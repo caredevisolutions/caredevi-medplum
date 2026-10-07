@@ -1,7 +1,16 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { ContentType } from '@medplum/core';
-import type { BulkDataExportOutput, Group, Patient } from '@medplum/fhirtypes';
+import type { WithId } from '@medplum/core';
+import { ContentType, createReference, getReferenceString } from '@medplum/core';
+import type {
+  BulkDataExportOutput,
+  Group,
+  Observation,
+  Organization,
+  Patient,
+  PractitionerRole,
+  Project,
+} from '@medplum/fhirtypes';
 import express from 'express';
 import request from 'supertest';
 import { vi } from 'vitest';
@@ -9,20 +18,23 @@ import { initApp, shutdownApp } from '../../app';
 import { getConfig, loadTestConfig } from '../../config/loader';
 import type { FileSystemStorage } from '../../storage/filesystem';
 import { getBinaryStorage } from '../../storage/loader';
-import { createTestProject, initTestAuth, waitForAsyncJob, withTestContext } from '../../test.setup';
-import { getGlobalSystemRepo } from '../repo';
+import { createTestProject, waitForAsyncJob, withTestContext } from '../../test.setup';
+import type { Repository, SystemRepository } from '../repo';
 import { groupExportResources } from './groupexport';
 import { BulkExporter } from './utils/bulkexporter';
 
 describe('Group Export', () => {
   const app = express();
-  const systemRepo = getGlobalSystemRepo();
   let accessToken: string;
+  let project: WithId<Project>;
+  let repo: Repository;
+  let systemRepo: SystemRepository;
 
   beforeAll(async () => {
     const config = await loadTestConfig();
     await initApp(app, config);
-    accessToken = await initTestAuth();
+    ({ project, accessToken, repo } = await createTestProject({ withAccessToken: true, withRepo: true }));
+    systemRepo = repo.getSystemRepo();
   });
 
   afterAll(async () => {
@@ -44,7 +56,7 @@ describe('Group Export', () => {
           { system: 'email', value: 'alice@example.com' },
         ],
       });
-    expect(res1.status).toBe(201);
+    expect(res1).toHaveStatus(201);
 
     // Create second patient
     const res2 = await request(app)
@@ -60,7 +72,7 @@ describe('Group Export', () => {
           { system: 'email', value: 'bob@example.com' },
         ],
       });
-    expect(res2.status).toBe(201);
+    expect(res2).toHaveStatus(201);
 
     // Create observation
     const res3 = await request(app)
@@ -73,7 +85,7 @@ describe('Group Export', () => {
         code: { text: 'test' },
         subject: { reference: `Patient/${res1.body.id}` },
       });
-    expect(res3.status).toBe(201);
+    expect(res3).toHaveStatus(201);
 
     // Create device
     const res4 = await request(app)
@@ -83,7 +95,7 @@ describe('Group Export', () => {
       .send({
         resourceType: 'Device',
       });
-    expect(res4.status).toBe(201);
+    expect(res4).toHaveStatus(201);
 
     // Create a group
     const res5 = await request(app)
@@ -100,13 +112,13 @@ describe('Group Export', () => {
           { entity: { reference: `Device/${res4.body.id}` } },
         ],
       });
-    expect(res5.status).toBe(201);
+    expect(res5).toHaveStatus(201);
 
     // Start the export
     const res6 = await request(app)
       .get(`/fhir/R4/Group/${res5.body.id}/$export`)
       .set('Authorization', 'Bearer ' + accessToken);
-    expect(res6.status).toBe(202);
+    expect(res6).toHaveStatus(202);
     expect(res6.headers['content-location']).toBeDefined();
 
     const exportResult = await waitForAsyncJob(res6.headers['content-location'], app, accessToken);
@@ -129,7 +141,7 @@ describe('Group Export', () => {
         resourceType: 'Patient',
         name: [{ given: ['Alice'], family: 'Smith' }],
       });
-    expect(patientRes.status).toBe(201);
+    expect(patientRes).toHaveStatus(201);
 
     const groupRes = await request(app)
       .post(`/fhir/R4/Group`)
@@ -141,14 +153,14 @@ describe('Group Export', () => {
         actual: true,
         member: [{ entity: { reference: `Patient/${patientRes.body.id}` } }],
       });
-    expect(groupRes.status).toBe(201);
+    expect(groupRes).toHaveStatus(201);
 
     const exportRes = await request(app)
       .post(`/fhir/R4/Group/${groupRes.body.id}/$export`)
       .set('Authorization', 'Bearer ' + accessToken)
       .set('Content-Type', ContentType.FHIR_JSON)
       .send({});
-    expect(exportRes.status).toBe(202);
+    expect(exportRes).toHaveStatus(202);
     expect(exportRes.headers['content-location']).toBeDefined();
     await waitForAsyncJob(exportRes.headers['content-location'], app, accessToken);
   });
@@ -176,7 +188,7 @@ describe('Group Export', () => {
           { system: 'email', value: 'alice@example.com' },
         ],
       });
-    expect(res1.status).toBe(201);
+    expect(res1).toHaveStatus(201);
 
     // Create observation
     // (Use extended mode to get the project metadata)
@@ -191,7 +203,7 @@ describe('Group Export', () => {
         code: { text: 'test' },
         subject: { reference: `Patient/${res1.body.id}` },
       });
-    expect(res2.status).toBe(201);
+    expect(res2).toHaveStatus(201);
 
     // Create observation "3 days ago"
     // (Use systemRepo to set meta.lastUpdated)
@@ -218,13 +230,13 @@ describe('Group Export', () => {
         actual: true,
         member: [{ entity: { reference: `Patient/${res1.body.id}` } }],
       });
-    expect(res4.status).toBe(201);
+    expect(res4).toHaveStatus(201);
 
     // Start the export with the "_since" filter
     const res5 = await request(app)
       .get(`/fhir/R4/Group/${res4.body.id}/$export?_since=${encodeURIComponent(since.toISOString())}`)
       .set('Authorization', 'Bearer ' + accessToken);
-    expect(res5.status).toBe(202);
+    expect(res5).toHaveStatus(202);
     expect(res5.headers['content-location']).toBeDefined();
 
     const exportResult = await waitForAsyncJob(res5.headers['content-location'], app, accessToken);
@@ -260,7 +272,7 @@ describe('Group Export', () => {
           { system: 'email', value: 'alice@example.com' },
         ],
       });
-    expect(res1.status).toBe(201);
+    expect(res1).toHaveStatus(201);
 
     // Create observation
     // (Use extended mode to get the project metadata)
@@ -275,7 +287,7 @@ describe('Group Export', () => {
         code: { text: 'test' },
         subject: { reference: `Patient/${res1.body.id}` },
       });
-    expect(res2.status).toBe(201);
+    expect(res2).toHaveStatus(201);
 
     // Create group
     const res3 = await request(app)
@@ -288,13 +300,13 @@ describe('Group Export', () => {
         actual: true,
         member: [{ entity: { reference: `Patient/${res1.body.id}` } }],
       });
-    expect(res3.status).toBe(201);
+    expect(res3).toHaveStatus(201);
 
     // Start the export with the "_type" filter
     const res4 = await request(app)
       .get(`/fhir/R4/Group/${res3.body.id}/$export?_type=Patient`)
       .set('Authorization', 'Bearer ' + accessToken);
-    expect(res4.status).toBe(202);
+    expect(res4).toHaveStatus(202);
     expect(res4.headers['content-location']).toBeDefined();
 
     const exportResult = await waitForAsyncJob(res4.headers['content-location'], app, accessToken);
@@ -302,6 +314,14 @@ describe('Group Export', () => {
     const output = exportResult.output as unknown as BulkDataExportOutput[];
     expect(output.some((o) => o.type === 'Patient')).toBeTruthy();
     expect(output.some((o) => o.type === 'Observation')).not.toBeTruthy();
+  });
+
+  test('Rejects _typeFilter', async () => {
+    const res = await request(app)
+      .get('/fhir/R4/Group/123/$export?_typeFilter=Observation?status=final')
+      .set('Authorization', 'Bearer ' + accessToken);
+    expect(res).toHaveStatus(400);
+    expect(res.body.issue[0].details.text).toBe('_typeFilter is not supported');
   });
 
   test('status accepted with error', async () => {
@@ -316,18 +336,16 @@ describe('Group Export', () => {
         actual: true,
         member: [{ entity: { reference: `Patient/1234` } }],
       });
-    expect(groupRes.status).toBe(201);
+    expect(groupRes).toHaveStatus(201);
     const res4 = await request(app)
       .get(`/fhir/R4/Group/${groupRes.body.id}/$export`)
       .set('Authorization', 'Bearer ' + accessToken);
-    expect(res4.status).toBe(202);
+    expect(res4).toHaveStatus(202);
     expect(res4.headers['content-location']).toBeDefined();
     await waitForAsyncJob(res4.headers['content-location'], app, accessToken);
   });
 
   test('groupExportResources without members', async () => {
-    const { project } = await createTestProject();
-    expect(project).toBeDefined();
     const exporter = new BulkExporter(systemRepo);
     const exportWriteResourceSpy = vi.spyOn(exporter, 'writeResource');
 
@@ -344,8 +362,6 @@ describe('Group Export', () => {
   });
 
   test('groupExportResources members without reference', async () => {
-    const { project } = await createTestProject();
-    expect(project).toBeDefined();
     const exporter = new BulkExporter(systemRepo);
 
     const patient: Patient = await systemRepo.createResource<Patient>({
@@ -368,4 +384,108 @@ describe('Group Export', () => {
     const bulkDataExport = await exporter.close(project);
     expect(bulkDataExport.status).toBe('completed');
   });
+
+  test('groupExportResources includes referenced resources', async () => {
+    const organization = await repo.createResource<Organization>({ resourceType: 'Organization' });
+    const role = await repo.createResource<PractitionerRole>({
+      resourceType: 'PractitionerRole',
+      organization: createReference(organization),
+    });
+    const patient = await repo.createResource<Patient>({ resourceType: 'Patient' });
+    const observation = await repo.createResource<Observation>({
+      resourceType: 'Observation',
+      status: 'final',
+      code: { text: 'test' },
+      subject: createReference(patient),
+      performer: [createReference(role)],
+    });
+    const group = await repo.createResource<Group>({
+      resourceType: 'Group',
+      type: 'person',
+      actual: true,
+      member: [{ entity: createReference(patient) }],
+    });
+
+    const getExportedReferences = async (types?: string[]): Promise<string[]> => {
+      const exporter = new BulkExporter(repo);
+      const writeResourceSpy = vi.spyOn(exporter, 'writeResource');
+      await exporter.start('http://example.com');
+      await groupExportResources(repo, exporter, project, group, types);
+      return writeResourceSpy.mock.calls.map(([resource]) => getReferenceString(resource));
+    };
+
+    // The Organization is only referenced by the PractitionerRole, which is referenced by the Observation
+    expect(await getExportedReferences()).toContainExactly(
+      [patient, observation, group, role, organization].map(getReferenceString)
+    );
+    expect(await getExportedReferences(['Observation'])).toStrictEqual([getReferenceString(observation)]);
+    // The Organization is still reached through the PractitionerRole, which _type excludes
+    expect(await getExportedReferences(['Observation', 'Organization'])).toContainExactly(
+      [observation, organization].map(getReferenceString)
+    );
+  });
+
+  test('Export with read-only access policy (no write scope)', () =>
+    withTestContext(async () => {
+      // Regression: $export is fundamentally a read operation. Its internal AsyncJob
+      // and Binary resources are server-side bookkeeping and must not require the caller
+      // to have write access -- e.g. a read-only `system/*.read` scope must still work.
+      // BulkExporter creates these via the system repo, scoped to the caller's project.
+
+      const readOnlyRepo = repo.clone({
+        accessPolicy: { resourceType: 'AccessPolicy', resource: [{ resourceType: '*', readonly: true }] },
+      });
+
+      const exporter = new BulkExporter(readOnlyRepo);
+
+      // Previously threw OperationOutcomeError(Forbidden): the AsyncJob was created via
+      // the caller's (read-only) repo.
+      const asyncJob = await exporter.start('http://example.com');
+      expect(asyncJob.id).toBeDefined();
+      expect(asyncJob.meta?.project).toBe(project.id);
+
+      // Writing output creates a Binary, which must also not require write access.
+      const patient = await systemRepo.createResource<Patient>({
+        resourceType: 'Patient',
+        meta: { project: project.id },
+        name: [{ given: ['Read'], family: 'Only' }],
+      });
+      await exporter.writeResource(patient);
+
+      const bulkDataExport = await exporter.close(project);
+      expect(bulkDataExport.status).toBe('completed');
+    }));
+
+  test('Export carries access-policy compartment as account', () =>
+    withTestContext(async () => {
+      // A caller whose access policy is compartment-scoped must still be able to read back
+      // the export's bookkeeping resources, so those resources carry the compartment as an
+      // account -- mirroring what the caller's own repo would have assigned on create.
+      const org = await systemRepo.createResource<Organization>({ resourceType: 'Organization', name: 'Acme' });
+      const compartment = { reference: getReferenceString(org) };
+      const { repo, project } = await createTestProject({
+        withRepo: true,
+        accessPolicy: {
+          compartment,
+          resource: [{ resourceType: '*', readonly: true }],
+        },
+      });
+
+      const exporter = new BulkExporter(repo);
+      const asyncJob = await exporter.start('http://example.com');
+      expect(asyncJob.meta?.accounts).toContainEqual(compartment);
+
+      // Writing output creates a Binary, which carries the same account.
+      const patient = await systemRepo.createResource<Patient>({
+        resourceType: 'Patient',
+        meta: { project: project.id },
+        name: [{ given: ['Compartment'], family: 'Scoped' }],
+      });
+      await exporter.writeResource(patient);
+      expect(exporter.writers.Patient.binary.meta?.accounts).toContainEqual(compartment);
+
+      // The account survives close() so the completed job stays readable.
+      const completed = await exporter.close(project);
+      expect(completed.meta?.accounts).toContainEqual(compartment);
+    }));
 });

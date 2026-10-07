@@ -1,19 +1,22 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { WithId } from '@medplum/core';
-import type { AsyncJob, Reference, ResourceType } from '@medplum/fhirtypes';
+import type { Reference, ResourceType } from '@medplum/fhirtypes';
 import type { Job } from 'bullmq';
 import { Queue, Worker } from 'bullmq';
-import { getUserConfiguration } from '../auth/me';
-import { runInAuthenticatedContext } from '../context';
-import { getRepoForLogin } from '../fhir/accesspolicy';
+import { getAuthenticatedContext, runInAuthenticatedContext } from '../context';
 import { setResourceAccounts } from '../fhir/operations/set-accounts';
-import { AsyncJobExecutor } from '../fhir/operations/utils/asyncjobexecutor';
-import { getShardSystemRepo } from '../fhir/repo';
-import { PLACEHOLDER_SHARD_ID } from '../fhir/sharding';
 import type { AuthState } from '../oauth/middleware';
+import type { AsyncJobTracking } from './base';
+import { getTrackingAsyncJobExecutor } from './base';
 import type { WorkerInitializer, WorkerInitializerOptions } from './utils';
-import { defaultQueueOptions, getWorkerBullmqConfig, queueRegistry } from './utils';
+import {
+  addVerboseQueueLogging,
+  defaultQueueOptions,
+  getWorkerBullmqConfig,
+  isJobActive,
+  queueRegistry,
+  trackJobMetrics,
+} from './utils';
 
 /*
  * The set-accounts worker asynchronously updates all account references
@@ -21,7 +24,7 @@ import { defaultQueueOptions, getWorkerBullmqConfig, queueRegistry } from './uti
  */
 
 export interface SetAccountsJobData {
-  readonly asyncJob: WithId<AsyncJob>;
+  readonly tracking: AsyncJobTracking;
   readonly resourceType: ResourceType;
   readonly id: string;
   readonly accounts: Reference[];
@@ -34,34 +37,29 @@ const queueName = 'SetAccountsQueue';
 const jobName = 'SetAccountsJobData';
 
 export const initSetAccountsWorker: WorkerInitializer = (config, options?: WorkerInitializerOptions) => {
-  const defaultOptions = defaultQueueOptions(config);
-  const queue = new Queue<SetAccountsJobData>(queueName, {
-    ...defaultOptions,
-  });
+  const queueOptions = defaultQueueOptions(config);
+  const queue = new Queue<SetAccountsJobData>(queueName, queueOptions);
 
   let worker: Worker<SetAccountsJobData> | undefined;
   if (options?.workerEnabled !== false) {
-    const workerBullmq = getWorkerBullmqConfig(config, 'set-accounts');
     worker = new Worker<SetAccountsJobData>(
       queueName,
-      (job) => {
+      trackJobMetrics('set-accounts', (job) => {
         const { authState, requestId, traceId } = job.data;
         return runInAuthenticatedContext(authState, requestId, traceId, { async: true }, () => execSetAccountsJob(job));
-      },
-      {
-        ...defaultOptions,
-        ...workerBullmq,
-      }
+      }),
+      getWorkerBullmqConfig(config, 'set-accounts', queueOptions)
     );
+    addVerboseQueueLogging<SetAccountsJobData>(queue, worker, (job) => {
+      return { asyncJob: 'AsyncJob/' + job.data.tracking.asyncJobId };
+    });
 
     worker.on('failed', async (job) => {
       if (!job) {
         return;
       }
 
-      // Mark AsyncJob as failed
-      const systemRepo = getShardSystemRepo(PLACEHOLDER_SHARD_ID); // shardId will be available in job.data.authState in the future
-      const exec = new AsyncJobExecutor(systemRepo, job.data.asyncJob);
+      const exec = await getTrackingAsyncJobExecutor(job.data.tracking);
       await exec.failJob();
     });
   }
@@ -92,16 +90,15 @@ export async function addSetAccountsJobData(job: SetAccountsJobData): Promise<Jo
 }
 
 export async function execSetAccountsJob(job: Job<SetAccountsJobData>): Promise<void> {
+  const { repo } = getAuthenticatedContext();
   const { resourceType, id, accounts } = job.data;
-  const { login, project, membership } = job.data.authState;
-  const systemRepo = getShardSystemRepo(PLACEHOLDER_SHARD_ID); // job.data will eventually include shardId
+  const exec = await getTrackingAsyncJobExecutor(job.data.tracking);
 
-  // Prepare the original submitting user's repo
-  const userConfig = await getUserConfiguration(systemRepo, project, membership);
-  const repo = await getRepoForLogin({ login, project, membership, userConfig }, true);
+  if (!isJobActive(exec.getAsyncJob())) {
+    return;
+  }
 
-  const exec = new AsyncJobExecutor(repo, job.data.asyncJob);
   await exec.startAsync(async () => {
-    return setResourceAccounts(repo, resourceType, id, { accounts, propagate: true });
+    return setResourceAccounts(repo, resourceType, id, { accounts, propagate: true }, exec.getAsyncJob().id);
   });
 }

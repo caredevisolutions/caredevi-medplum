@@ -14,13 +14,13 @@ import type { Mock } from 'vitest';
 import { vi } from 'vitest';
 import { initApp, shutdownApp } from '../app';
 import { getConfig, loadTestConfig } from '../config/loader';
-import { getGlobalSystemRepo, getProjectSystemRepo } from '../fhir/repo';
+import { USER_SECURITY_REQUEST_EXPIRATION_MS } from '../constants';
+import { getGlobalSystemRepo, getProjectSystemRepo, Repository } from '../fhir/repo';
 import { generateSecret } from '../oauth/keys';
 import { tryLogin } from '../oauth/utils';
 import { setupPwnedPasswordMock, setupRecaptchaMock, withTestContext } from '../test.setup';
 import { registerNew } from './register';
 
-vi.mock('hibp');
 const fetchMock = vi.spyOn(globalThis, 'fetch');
 const app = express();
 
@@ -79,11 +79,11 @@ describe('Set Password', () => {
       email,
       recaptchaToken: 'xyz',
     });
-    expect(res2.status).toBe(200);
+    expect(res2).toHaveStatus(200);
     expect(mockSESv2Client.commandCalls(SendEmailCommand)).toHaveLength(1);
 
     const userInfoRes1 = await request(app).get('/oauth2/userinfo').set('Authorization', `Bearer ${res.accessToken}`);
-    expect(userInfoRes1.status).toBe(200);
+    expect(userInfoRes1).toHaveStatus(200);
     expect(userInfoRes1.body).toMatchObject({
       email,
       email_verified: false,
@@ -102,7 +102,7 @@ describe('Set Password', () => {
       secret,
       password: 'my-new-password',
     });
-    expect(res3.status).toBe(200);
+    expect(res3).toHaveStatus(200);
 
     // Make sure that the user can login with the new password
     const res4 = await request(app).post('/auth/login').type('json').send({
@@ -110,7 +110,7 @@ describe('Set Password', () => {
       password: 'my-new-password',
       scope: 'openid',
     });
-    expect(res4.status).toBe(200);
+    expect(res4).toHaveStatus(200);
     const newAccessToken = res4.body.access_token as string;
 
     // Make sure that the PCR cannot be used again
@@ -119,15 +119,15 @@ describe('Set Password', () => {
       secret,
       password: 'bad-guys-trying-to-reuse-code',
     });
-    expect(res5.status).toBe(400);
+    expect(res5).toHaveStatus(400);
 
     // User must log in again
     const userInfoRes2 = await request(app).get('/oauth2/userinfo').set('Authorization', `Bearer ${newAccessToken}`);
-    expect(userInfoRes2.status).toBe(401);
+    expect(userInfoRes2).toHaveStatus(401);
 
     // Make sure that previous active login was revoked
     const userInfoRes3 = await request(app).get('/oauth2/userinfo').set('Authorization', `Bearer ${res.accessToken}`);
-    expect(userInfoRes3.status).toBe(401);
+    expect(userInfoRes3).toHaveStatus(401);
 
     // Ensure other Logins are also revoked
     const otherLogin = await getGlobalSystemRepo().readResource<Login>('Login', login.id);
@@ -166,7 +166,7 @@ describe('Set Password', () => {
       secret: usr.secret,
       password: 'my-new-password',
     });
-    expect(res3.status).toBe(200);
+    expect(res3).toHaveStatus(200);
 
     // Make sure that the user can login with the new password
     const res4 = await request(app).post('/auth/login').type('json').send({
@@ -174,7 +174,239 @@ describe('Set Password', () => {
       password: 'my-new-password',
       scope: 'openid',
     });
-    expect(res4.status).toBe(200);
+    expect(res4).toHaveStatus(200);
+  });
+
+  test('Expired UserSecurityRequest', async () => {
+    const email = `george${randomUUID()}@example.com`;
+
+    const { user, project } = await withTestContext(() =>
+      registerNew({
+        projectName: 'Set Password Project',
+        firstName: 'George',
+        lastName: 'Washington',
+        email,
+        password: 'password!@#',
+        scope: 'openid profile email',
+      })
+    );
+
+    const systemRepo = await getProjectSystemRepo(project);
+    const usr = await withTestContext(async () =>
+      systemRepo.createResource<UserSecurityRequest>({
+        resourceType: 'UserSecurityRequest',
+        meta: { project: project.id },
+        type: 'reset',
+        user: createReference(user),
+        secret: generateSecret(16),
+        expiresAt: new Date(Date.now() - 1000).toISOString(),
+      })
+    );
+
+    const res = await request(app).post('/auth/setpassword').type('json').send({
+      id: usr.id,
+      secret: usr.secret,
+      password: 'my-new-password',
+    });
+    expect(res).toHaveStatus(400);
+    expect(res.body).toMatchObject(badRequest('Expired'));
+
+    // The old password still works
+    const res2 = await request(app).post('/auth/login').type('json').send({
+      email,
+      password: 'password!@#',
+      scope: 'openid',
+    });
+    expect(res2).toHaveStatus(200);
+  });
+
+  test('UserSecurityRequest without expiresAt expires from lastUpdated', async () => {
+    const email = `george${randomUUID()}@example.com`;
+
+    const { user, project } = await withTestContext(() =>
+      registerNew({
+        projectName: 'Set Password Project',
+        firstName: 'George',
+        lastName: 'Washington',
+        email,
+        password: 'password!@#',
+        scope: 'openid profile email',
+      })
+    );
+
+    // Predates the expiresAt field, so it falls back to lastUpdated plus the reset window
+    const systemRepo = await getProjectSystemRepo(project);
+    const usr = await withTestContext(async () =>
+      systemRepo.createResource<UserSecurityRequest>({
+        resourceType: 'UserSecurityRequest',
+        meta: {
+          project: project.id,
+          lastUpdated: new Date(Date.now() - USER_SECURITY_REQUEST_EXPIRATION_MS.reset - 60_000).toISOString(),
+        },
+        type: 'reset',
+        user: createReference(user),
+        secret: generateSecret(16),
+      })
+    );
+    expect(usr.expiresAt).toBeUndefined();
+
+    const res = await request(app).post('/auth/setpassword').type('json').send({
+      id: usr.id,
+      secret: usr.secret,
+      password: 'my-new-password',
+    });
+    expect(res).toHaveStatus(400);
+    expect(res.body).toMatchObject(badRequest('Expired'));
+  });
+
+  test('UserSecurityRequest cannot be used twice', async () => {
+    const email = `george${randomUUID()}@example.com`;
+
+    const { user, project } = await withTestContext(() =>
+      registerNew({
+        projectName: 'Set Password Project',
+        firstName: 'George',
+        lastName: 'Washington',
+        email,
+        password: 'password!@#',
+        scope: 'openid profile email',
+      })
+    );
+
+    const systemRepo = await getProjectSystemRepo(project);
+    const usr = await withTestContext(async () =>
+      systemRepo.createResource<UserSecurityRequest>({
+        resourceType: 'UserSecurityRequest',
+        meta: { project: project.id },
+        type: 'reset',
+        user: createReference(user),
+        secret: generateSecret(16),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      })
+    );
+
+    const res = await request(app).post('/auth/setpassword').type('json').send({
+      id: usr.id,
+      secret: usr.secret,
+      password: 'my-new-password',
+    });
+    expect(res).toHaveStatus(200);
+
+    const res2 = await request(app).post('/auth/setpassword').type('json').send({
+      id: usr.id,
+      secret: usr.secret,
+      password: 'my-second-password',
+    });
+    expect(res2).toHaveStatus(400);
+    expect(res2.body).toMatchObject(badRequest('Already used'));
+  });
+
+  test('Breached password does not consume the UserSecurityRequest', async () => {
+    const email = `george${randomUUID()}@example.com`;
+
+    const { user, project } = await withTestContext(() =>
+      registerNew({
+        projectName: 'Set Password Project',
+        firstName: 'George',
+        lastName: 'Washington',
+        email,
+        password: 'password!@#',
+        scope: 'openid profile email',
+      })
+    );
+
+    const systemRepo = await getProjectSystemRepo(project);
+    const usr = await withTestContext(async () =>
+      systemRepo.createResource<UserSecurityRequest>({
+        resourceType: 'UserSecurityRequest',
+        meta: { project: project.id },
+        type: 'reset',
+        user: createReference(user),
+        secret: generateSecret(16),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      })
+    );
+
+    setupPwnedPasswordMock(pwnedPassword as unknown as Mock, 10);
+    const res = await request(app).post('/auth/setpassword').type('json').send({
+      id: usr.id,
+      secret: usr.secret,
+      password: 'breached-password',
+    });
+    expect(res).toHaveStatus(400);
+
+    // The link still works with an acceptable password
+    setupPwnedPasswordMock(pwnedPassword as unknown as Mock, 0);
+    const res2 = await request(app).post('/auth/setpassword').type('json').send({
+      id: usr.id,
+      secret: usr.secret,
+      password: 'my-new-password',
+    });
+    expect(res2).toHaveStatus(200);
+  });
+
+  test('Failure to apply the password does not consume the UserSecurityRequest', async () => {
+    const email = `george${randomUUID()}@example.com`;
+
+    const { user, project } = await withTestContext(() =>
+      registerNew({
+        projectName: 'Set Password Project',
+        firstName: 'George',
+        lastName: 'Washington',
+        email,
+        password: 'password!@#',
+        scope: 'openid profile email',
+      })
+    );
+
+    const systemRepo = await getProjectSystemRepo(project);
+    const usr = await withTestContext(async () =>
+      systemRepo.createResource<UserSecurityRequest>({
+        resourceType: 'UserSecurityRequest',
+        meta: { project: project.id },
+        type: 'reset',
+        user: createReference(user),
+        secret: generateSecret(16),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      })
+    );
+
+    // Fail the User write that follows the consume, so the transaction rolls back
+    const originalPatch = Repository.prototype.patchResource;
+    const updateSpy = vi.spyOn(Repository.prototype, 'patchResource').mockImplementation(async function (
+      this: Repository,
+      resourceType,
+      id,
+      patch,
+      options
+    ) {
+      if (resourceType === 'User') {
+        throw new Error('Simulated failure');
+      }
+      return originalPatch.call(this, resourceType, id, patch, options);
+    });
+
+    try {
+      const res = await request(app).post('/auth/setpassword').type('json').send({
+        id: usr.id,
+        secret: usr.secret,
+        password: 'my-new-password',
+      });
+      expect(res.status).not.toBe(200);
+    } finally {
+      updateSpy.mockRestore();
+    }
+
+    // The request was not consumed, so the link still works
+    const check = await systemRepo.readResource<UserSecurityRequest>('UserSecurityRequest', usr.id);
+    expect(check.used).toBeFalsy();
+
+    const res2 = await request(app).post('/auth/setpassword').type('json').send({
+      id: usr.id,
+      secret: usr.secret,
+      password: 'my-new-password',
+    });
+    expect(res2).toHaveStatus(200);
   });
 
   test('UserSecurityRequest invalid type', async () => {
@@ -209,7 +441,7 @@ describe('Set Password', () => {
       secret: usr.secret,
       password: 'my-new-password',
     });
-    expect(res3.status).toBe(400);
+    expect(res3).toHaveStatus(400);
   });
 
   test('Wrong secret', async () => {
@@ -222,13 +454,13 @@ describe('Set Password', () => {
       password: 'password!@#',
       recaptchaToken: 'xyz',
     });
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
 
     const res2 = await request(app).post('/auth/resetpassword').type('json').send({
       email,
       recaptchaToken: 'xyz',
     });
-    expect(res2.status).toBe(200);
+    expect(res2).toHaveStatus(200);
     expect(mockSESv2Client.commandCalls(SendEmailCommand)).toHaveLength(1);
 
     const args = mockSESv2Client.commandCalls(SendEmailCommand)[0].args[0].input;
@@ -243,7 +475,7 @@ describe('Set Password', () => {
       secret: 'WRONG!',
       password: 'my-new-password',
     });
-    expect(res3.status).toBe(400);
+    expect(res3).toHaveStatus(400);
   });
 
   test('Breached password', async () => {
@@ -256,13 +488,13 @@ describe('Set Password', () => {
       password: 'password!@#',
       recaptchaToken: 'xyz',
     });
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
 
     const res2 = await request(app).post('/auth/resetpassword').type('json').send({
       email,
       recaptchaToken: 'xyz',
     });
-    expect(res2.status).toBe(200);
+    expect(res2).toHaveStatus(200);
     expect(mockSESv2Client.commandCalls(SendEmailCommand)).toHaveLength(1);
 
     const args = mockSESv2Client.commandCalls(SendEmailCommand)[0].args[0].input;
@@ -281,7 +513,7 @@ describe('Set Password', () => {
       secret,
       password: 'breached',
     });
-    expect(res3.status).toBe(400);
+    expect(res3).toHaveStatus(400);
     expect(res3.body).toMatchObject(badRequest('Password found in breach database'));
   });
 
@@ -294,7 +526,7 @@ describe('Set Password', () => {
         secret: generateSecret(16),
         password: 'my-new-password',
       });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
   });
 
   test('Missing secret', async () => {
@@ -303,7 +535,7 @@ describe('Set Password', () => {
       secret: '',
       password: 'my-new-password',
     });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
   });
 
   test('Missing password', async () => {
@@ -315,7 +547,20 @@ describe('Set Password', () => {
         secret: generateSecret(16),
         password: '',
       });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
+  });
+
+  test('Password too long', async () => {
+    const res = await request(app)
+      .post('/auth/setpassword')
+      .type('json')
+      .send({
+        id: randomUUID(),
+        secret: generateSecret(16),
+        password: 'a'.repeat(73),
+      });
+    expect(res).toHaveStatus(400);
+    expect(res.body.issue[0].details.text).toBe('Password must be no more than 72 characters');
   });
 
   test('Not found', async () => {
@@ -327,6 +572,6 @@ describe('Set Password', () => {
         secret: generateSecret(16),
         password: 'my-new-password',
       });
-    expect(res.status).toBe(404);
+    expect(res).toHaveStatus(404);
   });
 });

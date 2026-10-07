@@ -286,7 +286,8 @@ export const medplumEslintConfig = [
       'packages/eslint-config/index.cjs',
       'packages/expo-medplum-polyfills/build',
       'packages/generator/output/',
-      'packages/react/.storybook/',
+      'packages/storybook/.storybook/',
+      'packages/storybook/storybook-static',
       'package-lock.json',
       '**/.turbo',
       '**/coverage/',
@@ -319,7 +320,7 @@ export const medplumEslintConfig = [
    * we don't need type checking for vite.config.ts or vitest.config.ts files
    */
   {
-    files: ['**/vite.config.ts', '**/vitest.config.ts'],
+    files: ['**/vite.config.ts', '**/vite.*.config.ts', '**/vitest.config.ts'],
     extends: [tseslint.configs.disableTypeChecked],
   },
 ];

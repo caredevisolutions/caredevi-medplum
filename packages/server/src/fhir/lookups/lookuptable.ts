@@ -44,7 +44,7 @@ export type TableJoin = {
  *   2) Human Names - structured names on Patients, Practitioners, and other person resource types
  *   3) Contact Points - email addresses and phone numbers
  */
-export abstract class LookupTable {
+abstract class LookupTable {
   /**
    * Returns the unique name of the lookup table.
    * @param resourceType - The resource type.
@@ -137,6 +137,9 @@ export abstract class LookupTable {
 
   protected readonly CONTAINS_SQL_OPERATOR: 'ILIKE' | 'LOWER_LIKE' = 'LOWER_LIKE';
 
+  /** True if the lookup table has a `projectId` column that search subqueries can filter on. */
+  protected readonly hasProjectIdColumn: boolean = false;
+
   /**
    * Builds a "where" condition for the select query builder.
    * @param _selectQuery - The select query builder.
@@ -144,6 +147,7 @@ export abstract class LookupTable {
    * @param table - The resource table.
    * @param _param - The search parameter.
    * @param filter - The search filter details.
+   * @param projectIds - The project IDs the search is restricted to, or undefined if unrestricted.
    * @returns The select query where expression.
    */
   buildWhere(
@@ -151,7 +155,8 @@ export abstract class LookupTable {
     resourceType: ResourceType,
     table: string,
     _param: SearchParameter,
-    filter: Filter
+    filter: Filter,
+    projectIds?: string[]
   ): Expression {
     if (filter.operator === FhirOperator.IN || filter.operator === FhirOperator.NOT_IN) {
       throw new OperationOutcomeError(invalidSearchOperator(filter.operator, filter.code));
@@ -188,14 +193,15 @@ export abstract class LookupTable {
       }
     }
 
-    const exists = new SqlFunction('EXISTS', [
-      new SelectQuery(lookupTableName).whereExpr(
-        new Conjunction([
-          new Condition(new Column(table, 'id'), '=', new Column(lookupTableName, 'resourceId')),
-          disjunction,
-        ])
-      ),
-    ]);
+    const conditions: Expression[] = [
+      new Condition(new Column(table, 'id'), '=', new Column(lookupTableName, 'resourceId')),
+    ];
+    if (this.hasProjectIdColumn && projectIds) {
+      conditions.push(new Condition(new Column(lookupTableName, 'projectId'), 'IN', projectIds));
+    }
+    conditions.push(disjunction);
+
+    const exists = new SqlFunction('EXISTS', [new SelectQuery(lookupTableName).whereExpr(new Conjunction(conditions))]);
 
     if (filter.operator === FhirOperator.NOT_EQUALS || filter.operator === FhirOperator.NOT) {
       return new Negation(exists);
@@ -310,3 +316,5 @@ export abstract class LookupTable {
     await deleteLookupRows.execute(client);
   }
 }
+
+export { LookupTable };

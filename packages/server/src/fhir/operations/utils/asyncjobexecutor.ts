@@ -12,6 +12,8 @@ import { DatabaseMode, getDatabasePool } from '../../../database';
 import { getLogger } from '../../../logger';
 import { markPostDeployMigrationCompleted } from '../../../migration-sql';
 import { maybeAutoRunPendingPostDeployMigration } from '../../../migrations/migration-utils';
+import { getProjectScopedUrl } from '../../../util/url';
+import { CancelledError } from '../../../workers/utils';
 import { sendOutcome } from '../../outcomes';
 import type { Repository } from '../../repo';
 
@@ -21,6 +23,43 @@ export class AsyncJobExecutor {
   constructor(repo: Repository, resource?: WithId<AsyncJob>) {
     this.repo = repo.clone();
     this.resource = resource;
+  }
+
+  /**
+   * Returns the AsyncJob managed by this executor.
+   * @returns The hydrated AsyncJob resource.
+   * @throws Error if the AsyncJob is not set.
+   */
+  getAsyncJob(): WithId<AsyncJob> {
+    if (!this.resource) {
+      throw new Error('AsyncJob missing');
+    }
+    return this.resource;
+  }
+
+  /**
+   * Reloads the managed AsyncJob from its owning repository.
+   * @returns The refreshed AsyncJob resource.
+   * @throws Error if the AsyncJob is not set.
+   */
+  async refresh(): Promise<WithId<AsyncJob>> {
+    const asyncJob = this.getAsyncJob();
+    this.resource = await this.repo.readResource<AsyncJob>('AsyncJob', asyncJob.id);
+    return this.resource;
+  }
+
+  /**
+   * Updates the job output without changing its status. The update is conditional so it cannot
+   * overwrite a concurrent cancellation or other lifecycle change.
+   * @param output - The current job output.
+   * @returns The updated AsyncJob resource.
+   */
+  async updateOutput(output: Parameters): Promise<WithId<AsyncJob>> {
+    const asyncJob = this.getAsyncJob();
+    this.resource = await this.repo
+      .getSystemRepo()
+      .updateResource<AsyncJob>({ ...asyncJob, output }, { ifMatch: asyncJob.meta?.versionId });
+    return this.resource;
   }
 
   async init(url: string, params?: Partial<AsyncJob>): Promise<WithId<AsyncJob>> {
@@ -119,11 +158,12 @@ export class AsyncJobExecutor {
         version: `v${completedDataVersion}`,
       });
       await markPostDeployMigrationCompleted(getDatabasePool(DatabaseMode.WRITER), completedDataVersion);
-      updatedJob = await this.repo.getSystemRepo().updateResource(updatedJob);
+      this.resource = updatedJob = await this.repo.getSystemRepo().updateResource(updatedJob);
       await maybeAutoRunPendingPostDeployMigration();
       return updatedJob;
     } else {
-      return this.repo.getSystemRepo().updateResource(updatedJob);
+      this.resource = await this.repo.getSystemRepo().updateResource(updatedJob);
+      return this.resource;
     }
   }
 
@@ -137,6 +177,10 @@ export class AsyncJobExecutor {
     // to handle.
     if (err instanceof DelayedError) {
       throw err;
+    }
+    // Job has been cancelled: do not update the async job with additional data
+    if (err instanceof CancelledError) {
+      return this.resource;
     }
 
     const failedJob: WithId<AsyncJob> = {
@@ -160,7 +204,8 @@ export class AsyncJobExecutor {
         );
       }
     }
-    return this.repo.getSystemRepo().updateResource(failedJob);
+    this.resource = await this.repo.getSystemRepo().updateResource(failedJob);
+    return this.resource;
   }
 
   getContentLocation(baseUrl: string): string {
@@ -182,5 +227,5 @@ export async function sendAsyncResponse(
   const exec = new AsyncJobExecutor(ctx.repo);
   await exec.init(req.protocol + '://' + req.get('host') + req.originalUrl);
   exec.start(callback);
-  sendOutcome(res, accepted(exec.getContentLocation(baseUrl)));
+  sendOutcome(res, accepted(exec.getContentLocation(getProjectScopedUrl(req.originalUrl, baseUrl))));
 }

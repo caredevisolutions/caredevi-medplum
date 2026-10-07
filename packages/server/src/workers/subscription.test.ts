@@ -4,11 +4,11 @@ import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import type { SearchRequest, WithId } from '@medplum/core';
 import {
   ContentType,
-  LogLevel,
-  Operator,
   createReference,
   generateId,
   getReferenceString,
+  LogLevel,
+  Operator,
   stringify,
 } from '@medplum/core';
 import type {
@@ -35,13 +35,15 @@ import { createHmac, randomUUID } from 'node:crypto';
 import type { Mock, MockInstance } from 'vitest';
 import { vi } from 'vitest';
 import { getConfig, loadTestConfig } from '../config/loader';
-import type { MedplumServerConfig } from '../config/types';
+import type { ServerConfig } from '../config/utils';
 import type * as Constants from '../constants';
 import { WEBSOCKET_SUB_PUBLISH_CHANNEL } from '../constants';
 import { tryGetRequestContext } from '../context';
+import * as projectMembershipUtils from '../fhir/projectmembership';
 import type { SystemRepository } from '../fhir/repo';
 import { Repository } from '../fhir/repo';
 import { setResourceCacheEntry } from '../fhir/repository/resource-cache';
+import { PLACEHOLDER_SHARD_ID } from '../fhir/sharding';
 import * as loggerModule from '../logger';
 import { globalLogger } from '../logger';
 import {
@@ -64,7 +66,6 @@ import {
   recordSubscriptionFailure,
 } from './subscription-failure-tracker';
 import { findAndExecDispatchJob, findAndExecSubscriptionJob } from './test-utils';
-import * as workerUtils from './utils';
 
 const wsSubscriptionTestChannels = vi.hoisted(() => {
   const suffix = process.env.VITEST_WORKER_ID ?? process.env.VITEST_POOL_ID ?? `pid-${process.pid}`;
@@ -101,6 +102,8 @@ describe('Subscription Worker', () => {
 
   beforeEach(async () => {
     fetchMock.mockClear();
+    getConfig().allowUnsafeOutbound = false;
+    getConfig().subscriptionsEnabled = true;
 
     // Create one simple project with no advanced features enabled
     const { client, repo: _repo } = await withTestContext(() =>
@@ -116,16 +119,16 @@ describe('Subscription Worker', () => {
 
     repo = _repo;
     systemRepo = repo.getSystemRepo();
-    superAdminRepo = new Repository({ extendedMode: true, superAdmin: true, author: createReference(client) });
+    superAdminRepo = new Repository({
+      routing: { kind: 'project-shard', shardId: PLACEHOLDER_SHARD_ID },
+      extendedMode: true,
+      superAdmin: true,
+      author: createReference(client),
+    });
 
     // Create another project, this one with bots enabled
-    const botProjectDetails = await createTestProject({ withClient: true });
-    botRepo = new Repository({
-      extendedMode: true,
-      projects: [botProjectDetails.project],
-      author: createReference(botProjectDetails.client),
-      currentProject: botProjectDetails.project,
-    });
+    const botProjectDetails = await createTestProject({ withClient: true, withRepo: true });
+    botRepo = botProjectDetails.repo;
 
     mockLambdaClient = mockClient(LambdaClient);
     mockLambdaClient.on(InvokeCommand).callsFake(({ Payload }) => {
@@ -188,6 +191,34 @@ describe('Subscription Worker', () => {
       await repo.deleteResource('Patient', patient.id);
 
       await findAndExecSubscriptionJob(patient, 'delete');
+    }));
+
+  test('Does not send subscriptions when disabled', () =>
+    withTestContext(async () => {
+      await repo.createResource<Subscription>({
+        resourceType: 'Subscription',
+        reason: 'test',
+        status: 'active',
+        criteria: 'Patient',
+        channel: {
+          type: 'rest-hook',
+          endpoint: 'https://example.com/subscription',
+        },
+      });
+
+      const patient = await repo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ given: ['Alice'], family: 'Smith' }],
+      });
+
+      const subscriptionQueue = getSubscriptionQueue();
+      expect(subscriptionQueue).toBeDefined();
+      (subscriptionQueue?.add as Mock).mockClear();
+
+      getConfig().subscriptionsEnabled = false;
+      await addSubscriptionJobs(patient, undefined, { project: repo.currentProject(), interaction: 'create' });
+
+      expect(subscriptionQueue?.add).not.toHaveBeenCalled();
     }));
 
   test('Status code 201', () =>
@@ -261,15 +292,15 @@ describe('Subscription Worker', () => {
             headers: {
               'Content-Type': ContentType.FHIR_JSON,
               Authorization: 'Basic xyz',
-              'x-trace-id': '00-12345678901234567890123456789012-3456789012345678-01',
-              traceparent: '00-12345678901234567890123456789012-3456789012345678-01',
+              'x-trace-id': '12345678901234567890123456789012',
+              traceparent: expect.stringMatching(/^00-12345678901234567890123456789012-[0-9a-f]{16}-01$/),
               'X-Medplum-Subscription': subscription.id,
               'X-Medplum-Interaction': 'create',
             },
           })
         );
       },
-      { traceId: '00-12345678901234567890123456789012-3456789012345678-01' }
+      { traceId: '12345678901234567890123456789012' }
     ));
 
   test('Create-only subscription', () =>
@@ -384,13 +415,13 @@ describe('Subscription Worker', () => {
               'X-Medplum-Interaction': 'delete',
               'X-Medplum-Deleted-Resource': `Patient/${patient.id}`,
               'X-Signature': createHmac('sha256', secret).update('{}').digest('hex'),
-              'x-trace-id': '00-12345678901234567890123456789012-3456789012345678-01',
-              traceparent: '00-12345678901234567890123456789012-3456789012345678-01',
+              'x-trace-id': '12345678901234567890123456789012',
+              traceparent: expect.stringMatching(/^00-12345678901234567890123456789012-[0-9a-f]{16}-01$/),
             },
           })
         );
       },
-      { traceId: '00-12345678901234567890123456789012-3456789012345678-01' }
+      { traceId: '12345678901234567890123456789012' }
     ));
 
   test('Send subscriptions with signature', () =>
@@ -438,15 +469,15 @@ describe('Subscription Worker', () => {
             headers: {
               'Content-Type': ContentType.FHIR_JSON,
               'X-Signature': signature,
-              'x-trace-id': '00-12345678901234567890123456789012-3456789012345678-01',
-              traceparent: '00-12345678901234567890123456789012-3456789012345678-01',
+              'x-trace-id': '12345678901234567890123456789012',
+              traceparent: expect.stringMatching(/^00-12345678901234567890123456789012-[0-9a-f]{16}-01$/),
               'X-Medplum-Subscription': subscription.id,
               'X-Medplum-Interaction': 'create',
             },
           })
         );
       },
-      { traceId: '00-12345678901234567890123456789012-3456789012345678-01' }
+      { traceId: '12345678901234567890123456789012' }
     ));
 
   test('Send subscriptions with legacy signature extension', () =>
@@ -494,15 +525,15 @@ describe('Subscription Worker', () => {
             headers: {
               'Content-Type': ContentType.FHIR_JSON,
               'X-Signature': signature,
-              'x-trace-id': '00-12345678901234567890123456789012-3456789012345678-01',
-              traceparent: '00-12345678901234567890123456789012-3456789012345678-01',
+              'x-trace-id': '12345678901234567890123456789012',
+              traceparent: expect.stringMatching(/^00-12345678901234567890123456789012-[0-9a-f]{16}-01$/),
               'X-Medplum-Subscription': subscription.id,
               'X-Medplum-Interaction': 'create',
             },
           })
         );
       },
-      { traceId: '00-12345678901234567890123456789012-3456789012345678-01' }
+      { traceId: '12345678901234567890123456789012' }
     ));
 
   test('Ignore non-subscription subscriptions', () =>
@@ -548,7 +579,7 @@ describe('Subscription Worker', () => {
       await expect(findAndExecSubscriptionJob(patient, 'create')).rejects.toThrow('Job not found');
     }));
 
-  test('Reject insecure rest-hook URLs by default', () =>
+  test('Ignore insecure rest-hook URLs by default', () =>
     withTestContext(async () => {
       const subscription = await repo.createResource<Subscription>({
         resourceType: 'Subscription',
@@ -568,29 +599,151 @@ describe('Subscription Worker', () => {
       });
       expect(patient).toBeDefined();
 
-      await expect(findAndExecSubscriptionJob(patient, 'create')).rejects.toThrow('HTTPS is required');
-      expect(fetch).not.toHaveBeenCalled();
+      await expect(findAndExecSubscriptionJob(patient, 'create')).rejects.toThrow('Job not found');
     }));
 
-  test('Allow insecure rest-hook URLs when configured', () =>
+  test('Send insecure rest-hook URLs to fetch when unsafe outbound is allowed', () =>
     withTestContext(async () => {
-      const url = 'http://example.com/subscription';
-      const savedConfig = getConfig().allowInsecureRestHookUrl;
-      getConfig().allowInsecureRestHookUrl = true;
+      getConfig().allowUnsafeOutbound = true;
+      const url = 'http://localhost:8080/subscription';
+      const subscription = await repo.createResource<Subscription>({
+        resourceType: 'Subscription',
+        reason: 'test',
+        status: 'active',
+        criteria: 'Patient',
+        channel: {
+          type: 'rest-hook',
+          endpoint: url,
+        },
+      });
+      expect(subscription).toBeDefined();
+
+      const patient = await repo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ given: ['Alice'], family: 'Smith' }],
+      });
+      expect(patient).toBeDefined();
+
+      fetchMock.mockImplementation(() => mockFetchStatus(200));
+
+      await findAndExecSubscriptionJob(patient, 'create');
+
+      expect(fetch).toHaveBeenCalledWith(
+        url,
+        expect.objectContaining({
+          method: 'POST',
+          body: stringify(patient),
+        })
+      );
+    }));
+
+  test('Server-scoped subscription fires across projects when enabled', () =>
+    withTestContext(async () => {
+      const url = 'https://example.com/server-scoped-subscription';
+      const savedConfig = getConfig().serverScopedSubscriptionsEnabled;
+      getConfig().serverScopedSubscriptionsEnabled = true;
+
+      const projectId = repo.currentProject()?.id;
+      assert(projectId);
+
+      // Create a subscription with no project (i.e. server-scoped / system project)
+      const serverSub = await superAdminRepo.createResource<Subscription>({
+        resourceType: 'Subscription',
+        reason: 'test',
+        status: 'active',
+        criteria: 'Patient',
+        channel: { type: 'rest-hook', endpoint: url },
+      });
+      // A server-scoped subscription is not scoped to any project (stored in the system project)
+      expect(serverSub.meta?.project).toBeUndefined();
+
+      const projectSub = await repo.createResource<Subscription>({
+        resourceType: 'Subscription',
+        reason: 'test',
+        status: 'active',
+        criteria: 'Patient',
+        channel: { type: 'rest-hook', endpoint: url },
+      });
 
       try {
-        const subscription = await repo.createResource<Subscription>({
-          resourceType: 'Subscription',
-          reason: 'test',
-          status: 'active',
-          criteria: 'Patient',
-          channel: {
-            type: 'rest-hook',
-            endpoint: url,
-          },
+        // Create a patient in a regular project
+        const patient = await repo.createResource<Patient>({
+          resourceType: 'Patient',
+          name: [{ given: ['Alice'], family: 'Smith' }],
         });
-        expect(subscription).toBeDefined();
+        expect(patient).toBeDefined();
+        // The patient lives in a real project (unlike the project-less server-scoped subscription).
+        expect(patient.meta?.project).toStrictEqual(projectId);
 
+        fetchMock.mockImplementation(() => mockFetchStatus(200));
+
+        // The server-scoped subscription should fire for a resource in a different project.
+        // Target this specific subscription's job so other (potentially leftover) server-scoped
+        // subscriptions in the shared system project don't make the assertions non-deterministic.
+        await findAndExecSubscriptionJob(patient, 'create', serverSub);
+
+        expect(fetch).toHaveBeenCalledWith(url, expect.objectContaining({ method: 'POST', body: stringify(patient) }));
+
+        // project-scoped subscriptions should also fire
+        await findAndExecSubscriptionJob(patient, 'create', projectSub);
+
+        // The AuditEvent for a server-scoped subscription inherits the subscription's (missing)
+        // project rather than the triggering resource's project, so it is itself project-less and
+        // lives in the system scope alongside the subscription. Search across all projects with the
+        // system repo and locate it by the entity it references.
+        const auditEvents = await repo.getSystemRepo().searchResources<AuditEvent>({
+          resourceType: 'AuditEvent',
+          filters: [{ code: 'entity', operator: Operator.EQUALS, value: getReferenceString(patient) }],
+        });
+        // The audit event references the server-scoped subscription that triggered it...
+        const serverAuditEvent = auditEvents.find((e) =>
+          e.entity?.some((entity) => entity.what?.reference === getReferenceString(serverSub))
+        );
+        expect(serverAuditEvent).toBeDefined();
+        // ...and, like that subscription, is not scoped to any project.
+        expect(serverAuditEvent?.meta?.project).toBeUndefined();
+
+        // audit event for the project-scoped subscription
+        const projectAuditEvent = auditEvents.find((e) =>
+          e.entity?.some((entity) => entity.what?.reference === getReferenceString(projectSub))
+        );
+        // is scoped to the project.
+        expect(projectAuditEvent?.meta?.project).toStrictEqual(projectId);
+      } finally {
+        getConfig().serverScopedSubscriptionsEnabled = savedConfig;
+        // Clean up the server-scoped subscription so it does not leak into the shared system project
+        await superAdminRepo.deleteResource('Subscription', serverSub.id);
+      }
+    }));
+
+  test('Server-scoped subscription does not fire when disabled', () =>
+    withTestContext(async () => {
+      const url = 'https://example.com/server-scoped-subscription-disabled';
+      const savedConfig = getConfig().serverScopedSubscriptionsEnabled;
+      // Explicitly disabled (this is also the default)
+      getConfig().serverScopedSubscriptionsEnabled = false;
+
+      const projectId = repo.currentProject()?.id;
+      assert(projectId);
+
+      const serverSub = await superAdminRepo.createResource<Subscription>({
+        resourceType: 'Subscription',
+        reason: 'test',
+        status: 'active',
+        criteria: 'Patient',
+        channel: { type: 'rest-hook', endpoint: url },
+      });
+      expect(serverSub.meta?.project).toBeUndefined();
+
+      const projectSub = await repo.createResource<Subscription>({
+        resourceType: 'Subscription',
+        reason: 'test',
+        status: 'active',
+        criteria: 'Patient',
+        channel: { type: 'rest-hook', endpoint: url },
+      });
+
+      try {
         const patient = await repo.createResource<Patient>({
           resourceType: 'Patient',
           name: [{ given: ['Alice'], family: 'Smith' }],
@@ -599,17 +752,36 @@ describe('Subscription Worker', () => {
 
         fetchMock.mockImplementation(() => mockFetchStatus(200));
 
-        await findAndExecSubscriptionJob(patient, 'create');
+        // With server-scoped subscriptions disabled, the project-less subscription is not
+        // considered for resources in other projects, so its job should never be enqueued.
+        await expect(findAndExecSubscriptionJob(patient, 'create', serverSub)).rejects.toThrow('Job not found');
+        expect(fetch).not.toHaveBeenCalledWith(url, expect.anything());
 
-        expect(fetch).toHaveBeenCalledWith(
-          url,
-          expect.objectContaining({
-            method: 'POST',
-            body: stringify(patient),
-          })
+        // project-scoped subscriptions should still fire
+        await findAndExecSubscriptionJob(patient, 'create', projectSub);
+        expect(fetch).toHaveBeenCalledWith(url, expect.objectContaining({ method: 'POST', body: stringify(patient) }));
+
+        const auditEvents = await repo.getSystemRepo().searchResources<AuditEvent>({
+          resourceType: 'AuditEvent',
+          filters: [{ code: 'entity', operator: Operator.EQUALS, value: getReferenceString(patient) }],
+        });
+
+        // The audit event references the server-scoped subscription that triggered it...
+        const serverAuditEvent = auditEvents.find((e) =>
+          e.entity?.some((entity) => entity.what?.reference === getReferenceString(serverSub))
         );
+        expect(serverAuditEvent).toBeUndefined();
+
+        // audit event for the project-scoped subscription
+        const projectAuditEvent = auditEvents.find((e) =>
+          e.entity?.some((entity) => entity.what?.reference === getReferenceString(projectSub))
+        );
+        // is scoped to the project.
+        expect(projectAuditEvent?.meta?.project).toStrictEqual(projectId);
       } finally {
-        getConfig().allowInsecureRestHookUrl = savedConfig;
+        getConfig().serverScopedSubscriptionsEnabled = savedConfig;
+        // Clean up the server-scoped subscription so it does not leak into the shared system project
+        await superAdminRepo.deleteResource('Subscription', serverSub.id);
       }
     }));
 
@@ -985,10 +1157,10 @@ describe('Subscription Worker', () => {
       });
       expect(bundle.entry?.length).toStrictEqual(1);
 
-      const auditEvent = bundle.entry?.[0]?.resource as AuditEvent;
-      expect(auditEvent.outcomeDesc).toStrictEqual('Bots not enabled');
-      expect(auditEvent.period).toBeDefined();
-      expect(auditEvent.entity).toHaveLength(3);
+      const botAuditEvent = bundle.entry?.[0]?.resource as AuditEvent;
+      expect(botAuditEvent.outcomeDesc).toStrictEqual('Bots not enabled');
+      expect(botAuditEvent.period).toBeDefined();
+      expect(botAuditEvent.entity).toHaveLength(3);
     }));
 
   test('Execute bot subscriptions', () =>
@@ -1104,6 +1276,66 @@ describe('Subscription Worker', () => {
       });
       expect(bundle.entry?.length).toStrictEqual(1);
       expect(bundle.entry?.[0]?.resource?.outcome).toStrictEqual('0');
+    }));
+
+  test('Bot subscription execution AuditEvent is always emitted to logs', () =>
+    withTestContext(async () => {
+      const config = await loadTestConfig();
+      config.logAuditEvents = true;
+      const writeSpy = vi.spyOn(globalLogger, 'write' as any).mockImplementation(() => undefined);
+
+      const bot = await botRepo.createResource<Bot>({
+        resourceType: 'Bot',
+        name: 'Test Bot',
+        runtimeVersion: 'awslambda',
+        auditEventDestination: ['resource'],
+        code: `export async function handler(medplum, event) { return event.input; }`,
+      });
+
+      await systemRepo.createResource<ProjectMembership>({
+        resourceType: 'ProjectMembership',
+        project: { reference: 'Project/' + bot.meta?.project },
+        user: createReference(bot),
+        profile: createReference(bot),
+      });
+
+      const subscription = await botRepo.createResource<Subscription>({
+        resourceType: 'Subscription',
+        reason: 'test',
+        status: 'active',
+        criteria: 'Patient',
+        channel: { type: 'rest-hook', endpoint: getReferenceString(bot) },
+      });
+
+      const patient = await botRepo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ given: ['Alice'], family: 'Smith' }],
+      });
+
+      try {
+        await findAndExecSubscriptionJob(patient, 'create');
+
+        // The bot execution AuditEvent (type 'execute') must appear in logs regardless of auditEventDestination
+        const loggedExecuteCall = writeSpy.mock.calls.find((call: unknown[]) => {
+          try {
+            const parsed = JSON.parse(call[0] as string);
+            return parsed.resourceType === 'AuditEvent' && parsed.type?.code === 'execute';
+          } catch {
+            return false;
+          }
+        });
+        expect(loggedExecuteCall).toBeDefined();
+      } finally {
+        config.logAuditEvents = false;
+        writeSpy.mockRestore();
+      }
+
+      // No separate 'transmit' AuditEvent should be created for bot subscriptions
+      const bundle = await botRepo.search<AuditEvent>({
+        resourceType: 'AuditEvent',
+        filters: [{ code: 'entity', operator: Operator.EQUALS, value: getReferenceString(subscription) }],
+      });
+      expect(bundle.entry?.map((e) => e.resource?.type.code)).toStrictEqual(['execute']);
     }));
 
   test('Execute Bot from linked Project', () =>
@@ -1765,8 +1997,9 @@ describe('Subscription Worker', () => {
 
       // Create an access policy in different project
       // This should trigger an error when the subscription is executed
-      const accessPolicy = await repo.createResource<AccessPolicy>({
+      const accessPolicy = await systemRepo.createResource<AccessPolicy>({
         resourceType: 'AccessPolicy',
+        meta: { project: repo.currentProject()?.id },
         resource: [{ resourceType: 'Patient', readonly: false }, { resourceType: 'Subscription' }],
       });
 
@@ -1836,8 +2069,9 @@ describe('Subscription Worker', () => {
 
       // Create an access policy in different project
       // This should trigger an error when the subscription is executed
-      const accessPolicy = await repo.createResource<AccessPolicy>({
+      const accessPolicy = await systemRepo.createResource<AccessPolicy>({
         resourceType: 'AccessPolicy',
+        meta: { project: repo.currentProject()?.id },
         resource: [{ resourceType: 'Patient' }, { resourceType: 'Subscription' }],
       });
 
@@ -1928,7 +2162,7 @@ describe('Subscription Worker', () => {
         name: [{ given: ['Alice'], family: 'Smith' }],
       });
 
-      const spy = vi.spyOn(workerUtils, 'findProjectMembership');
+      const spy = vi.spyOn(projectMembershipUtils, 'findProjectMembership');
 
       await addSubscriptionJobs(patient, undefined, { project, interaction: 'create' });
 
@@ -2242,6 +2476,7 @@ describe('Subscription Worker', () => {
 
         const ctx = tryGetRequestContext();
         const jobData: SubscriptionJobData = {
+          target: { kind: 'project', projectId: subscription.meta?.project as string },
           subscriptionId: subscription.id,
           resourceType: resource.resourceType,
           channelType: subscription.channel.type,
@@ -2331,8 +2566,9 @@ describe('Subscription Worker', () => {
 
         // Create an access policy in different project
         // This should trigger an error when the subscription is executed
-        const accessPolicy = await repo.createResource<AccessPolicy>({
+        const accessPolicy = await systemRepo.createResource<AccessPolicy>({
           resourceType: 'AccessPolicy',
+          meta: { project: repo.currentProject()?.id },
           resource: [{ resourceType: 'Patient' }, { resourceType: 'Subscription' }],
         });
 
@@ -2397,8 +2633,9 @@ describe('Subscription Worker', () => {
         const url = 'https://example.com/subscription';
 
         // An access policy that restricts Patient to a specific ID that will never match our patient.
-        const accessPolicy = await repo.createResource<AccessPolicy>({
+        const accessPolicy = await systemRepo.createResource<AccessPolicy>({
           resourceType: 'AccessPolicy',
+          meta: { project: repo.currentProject()?.id },
           resource: [
             { resourceType: 'Patient', criteria: `Patient?_id=${generateId()}` },
             { resourceType: 'Subscription' },
@@ -2514,30 +2751,35 @@ describe('Subscription Worker', () => {
           resource: [{ resourceType: 'Patient', criteria: `Patient?_compartment=${allowedOrgId}` }],
         });
 
-        // Create the "no access" membership FIRST so that `findProjectMembership` returns
-        // it ahead of the "has access" membership -- this is what makes the
-        // `authorMembershipId` plumbing necessary in the first place.
-        const noAccessMembership = await superAdminRepo.createResource<ProjectMembership>({
+        // Two memberships for the same profile, created without policies: `findProjectMembership`
+        // returns them in no particular order, so which policy goes where is decided after the fact.
+        const membershipTemplate: ProjectMembership = {
           resourceType: 'ProjectMembership',
           user: createReference(client),
           profile: createReference(practitioner),
           project: createReference(wsProject),
+        };
+        const membershipA = await superAdminRepo.createResource<ProjectMembership>(membershipTemplate);
+        const membershipB = await superAdminRepo.createResource<ProjectMembership>(membershipTemplate);
+
+        // Whichever membership the unordered lookup returns first gets the denying policy, so a
+        // worker that fell back to `findProjectMembership` would deny the allowed subscription.
+        const firstFound = await projectMembershipUtils.findProjectMembership(
+          wsProject.id,
+          createReference(practitioner)
+        );
+        expect([membershipA.id, membershipB.id]).toContain(firstFound?.id);
+        const [noAccessMembership, hasAccessMembership] =
+          firstFound?.id === membershipA.id ? [membershipA, membershipB] : [membershipB, membershipA];
+
+        await superAdminRepo.updateResource<ProjectMembership>({
+          ...noAccessMembership,
           accessPolicy: createReference(noAccessPolicy),
         });
-
-        const hasAccessMembership = await superAdminRepo.createResource<ProjectMembership>({
-          resourceType: 'ProjectMembership',
-          user: createReference(client),
-          profile: createReference(practitioner),
-          project: createReference(wsProject),
+        await superAdminRepo.updateResource<ProjectMembership>({
+          ...hasAccessMembership,
           accessPolicy: createReference(hasAccessPolicy),
         });
-
-        // Sanity check: the unordered membership lookup returns the denying membership
-        // first.  If this ever changes, the rest of the test stops exercising what it
-        // intends to exercise.
-        const firstFound = await workerUtils.findProjectMembership(wsProject.id, createReference(practitioner));
-        expect(firstFound?.id).toStrictEqual(noAccessMembership.id);
 
         // Two WebSocket subscriptions, one bound with each membership.
         const noAccessSub = await wsRepo.createResource<Subscription>({
@@ -3011,10 +3253,7 @@ describe('Subscription Worker', () => {
 
         const message = await nextMessagePromise;
         const subIds = message.events.map(([subId]) => subId);
-        expect(subIds).toHaveLength(3);
-        expect(subIds).toContain(sub1.id);
-        expect(subIds).toContain(sub2.id);
-        expect(subIds).toContain(sub3.id);
+        expect(subIds).toContainExactly([sub1.id, sub2.id, sub3.id]);
       }));
 
     test('Cached criteria - multiple subscriptions with same non-matching criteria do not fire', () =>
@@ -3121,9 +3360,7 @@ describe('Subscription Worker', () => {
         // Only the Alice subscriptions should fire; Bob subscriptions should be skipped via cached result
         const message = await nextMessagePromise;
         const subIds = message.events.map(([subId]) => subId);
-        expect(subIds).toHaveLength(2);
-        expect(subIds).toContain(aliceSub1.id);
-        expect(subIds).toContain(aliceSub2.id);
+        expect(subIds).toContainExactly([aliceSub1.id, aliceSub2.id]);
       }));
 
     test('Logs WS subscription eval info after evaluating criteria', () =>
@@ -3373,7 +3610,7 @@ describe('Subscription Worker', () => {
   });
 
   describe('Subscription auto-disable', () => {
-    let savedConfig: MedplumServerConfig['subscriptionAutoDisable'];
+    let savedConfig: ServerConfig['subscriptionAutoDisable'];
 
     beforeEach(() => {
       savedConfig = getConfig().subscriptionAutoDisable;
@@ -3880,7 +4117,7 @@ describe('Subscription Worker Event Handling', () => {
     const recordHistogramValueSpy = vi.spyOn(otelModule, 'recordHistogramValue').mockImplementation(() => true);
 
     // Initialize the subscription worker with mock config
-    initSubscriptionWorker({} as MedplumServerConfig);
+    initSubscriptionWorker({} as ServerConfig);
 
     // Create test job objects with the structure expected by the handlers
     const createTestJob = (id: string, attemptsMade = 0): Job =>

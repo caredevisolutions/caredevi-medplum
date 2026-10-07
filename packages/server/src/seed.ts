@@ -3,7 +3,7 @@
 import { createReference } from '@medplum/core';
 import type { ClientApplication, Project, ProjectMembership, User } from '@medplum/fhirtypes';
 import { bcryptHashPassword, createProfile, createProjectMembership } from './auth/utils';
-import type { MedplumServerConfig } from './config/types';
+import type { ServerConfig } from './config/utils';
 import { r4ProjectId } from './constants';
 import type { SystemRepository } from './fhir/repo';
 import { getShardSystemRepo } from './fhir/repo';
@@ -13,7 +13,7 @@ import { rebuildR4SearchParameters } from './seeds/searchparameters';
 import { rebuildR4StructureDefinitions } from './seeds/structuredefinitions';
 import { rebuildR4ValueSets } from './seeds/valuesets';
 
-export async function seedDatabase(config: MedplumServerConfig): Promise<void> {
+export async function seedDatabase(config: ServerConfig): Promise<void> {
   // client will eventually know its shard ID
   const systemRepo = getShardSystemRepo(PLACEHOLDER_SHARD_ID, undefined, {
     skipBackgroundJobs: true,
@@ -24,28 +24,43 @@ export async function seedDatabase(config: MedplumServerConfig): Promise<void> {
     return;
   }
 
-  await systemRepo.withTransaction(async (txRepo) => {
-    await createSuperAdmin(txRepo, config);
+  await systemRepo.withTransaction(
+    async (txRepo) => {
+      await createSuperAdmin(txRepo, config);
 
-    globalLogger.info('Building structure definitions...');
-    let startTime = Date.now();
-    await rebuildR4StructureDefinitions(txRepo);
-    globalLogger.info('Finished building structure definitions', { durationMs: Date.now() - startTime });
+      globalLogger.info('Building structure definitions...');
+      let startTime = Date.now();
+      await rebuildR4StructureDefinitions(txRepo);
+      globalLogger.info('Finished building structure definitions', { durationMs: Date.now() - startTime });
 
-    globalLogger.info('Building value sets...');
-    startTime = Date.now();
-    await rebuildR4ValueSets(txRepo);
-    globalLogger.info('Finished building value sets', { durationMs: Date.now() - startTime });
+      globalLogger.info('Building value sets...');
+      startTime = Date.now();
+      await rebuildR4ValueSets(txRepo);
+      globalLogger.info('Finished building value sets', { durationMs: Date.now() - startTime });
 
-    globalLogger.info('Building search parameters...');
-    startTime = Date.now();
-    await rebuildR4SearchParameters(txRepo);
-    globalLogger.info('Finished building search parameters', { durationMs: Date.now() - startTime });
-  });
+      globalLogger.info('Building search parameters...');
+      startTime = Date.now();
+      await rebuildR4SearchParameters(txRepo);
+      globalLogger.info('Finished building search parameters', { durationMs: Date.now() - startTime });
+    },
+    {
+      resourceTypes: [
+        'ClientApplication',
+        'Practitioner',
+        'Project',
+        'ProjectMembership',
+        'SearchParameter',
+        'StructureDefinition',
+        'User',
+        'ValueSet',
+      ],
+      source: 'seedDatabase',
+    }
+  );
 }
 
-async function createSuperAdmin(systemRepo: SystemRepository, config: MedplumServerConfig): Promise<void> {
-  const email = config.defaultSuperAdminEmail ?? 'admin@example.com';
+async function createSuperAdmin(systemRepo: SystemRepository, config: ServerConfig): Promise<void> {
+  const email = (config.defaultSuperAdminEmail ?? 'admin@example.com').toLowerCase();
   const password = config.defaultSuperAdminPassword ?? 'medplum_admin';
   const [firstName, lastName] = ['Medplum', 'Admin'];
   const passwordHash = await bcryptHashPassword(password);

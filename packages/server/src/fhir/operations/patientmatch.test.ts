@@ -31,7 +31,7 @@ describe('Patient $match Operation', () => {
         resourceType: 'Parameters',
         parameter: [],
       });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
   });
 
   test('Returns 400 when resource is not a Patient', async () => {
@@ -48,7 +48,7 @@ describe('Patient $match Operation', () => {
           },
         ],
       });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
   });
 
   test('Returns 400 when Patient has no matchable fields', async () => {
@@ -67,7 +67,7 @@ describe('Patient $match Operation', () => {
           },
         ],
       });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
   });
 
   test('Returns 400 when Patient only has gender', async () => {
@@ -87,7 +87,7 @@ describe('Patient $match Operation', () => {
           },
         ],
       });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
   });
 
   test('Returns empty bundle when no patients match', async () => {
@@ -108,7 +108,7 @@ describe('Patient $match Operation', () => {
           },
         ],
       });
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
     const bundle = res.body as Bundle;
     expect(bundle.resourceType).toBe('Bundle');
     expect(bundle.type).toBe('searchset');
@@ -129,7 +129,7 @@ describe('Patient $match Operation', () => {
         birthDate: '1980-06-15',
         gender: 'female',
       } satisfies Patient);
-    expect(createRes.status).toBe(201);
+    expect(createRes).toHaveStatus(201);
 
     const matchRes = await request(app)
       .post('/fhir/R4/Patient/$match')
@@ -151,7 +151,7 @@ describe('Patient $match Operation', () => {
         ],
       });
 
-    expect(matchRes.status).toBe(200);
+    expect(matchRes).toHaveStatus(200);
     const bundle = matchRes.body as Bundle<Patient>;
     expect(bundle.type).toBe('searchset');
     expect(bundle.total).toBeGreaterThan(0);
@@ -197,11 +197,11 @@ describe('Patient $match Operation', () => {
         ],
       });
 
-    expect(matchRes.status).toBe(200);
+    expect(matchRes).toHaveStatus(200);
     const bundle = matchRes.body as Bundle<Patient>;
     expect(bundle.total).toBeGreaterThan(0);
     const topEntry = bundle.entry?.[0];
-    expect(topEntry?.search?.score).toBeCloseTo(3 / 11);
+    expect(topEntry?.search?.score).toBeCloseTo(3 / 12);
     expect(topEntry?.search?.extension?.find((e) => e.url.endsWith('match-grade'))?.valueCode).toBe('possible');
     expect(topEntry?.search?.extension?.some((e) => e.url.endsWith('cms-match-combination'))).toBe(false);
   });
@@ -219,7 +219,7 @@ describe('Patient $match Operation', () => {
         birthDate,
         telecom: [{ system: 'phone', value: phone }],
       } satisfies Patient);
-    expect(createRes.status).toBe(201);
+    expect(createRes).toHaveStatus(201);
 
     const matchRes = await request(app)
       .post('/fhir/R4/Patient/$match')
@@ -240,7 +240,7 @@ describe('Patient $match Operation', () => {
         ],
       });
 
-    expect(matchRes.status).toBe(200);
+    expect(matchRes).toHaveStatus(200);
     const bundle = matchRes.body as Bundle<Patient>;
     expect(bundle.entry?.some((e) => e.resource?.id === createRes.body.id)).toBe(true);
   });
@@ -258,7 +258,7 @@ describe('Patient $match Operation', () => {
         birthDate,
         telecom: [{ system: 'email', value: email }],
       } satisfies Patient);
-    expect(createRes.status).toBe(201);
+    expect(createRes).toHaveStatus(201);
 
     const matchRes = await request(app)
       .post('/fhir/R4/Patient/$match')
@@ -279,7 +279,7 @@ describe('Patient $match Operation', () => {
         ],
       });
 
-    expect(matchRes.status).toBe(200);
+    expect(matchRes).toHaveStatus(200);
     const bundle = matchRes.body as Bundle<Patient>;
     expect(bundle.entry?.some((e) => e.resource?.id === createRes.body.id)).toBe(true);
   });
@@ -314,7 +314,7 @@ describe('Patient $match Operation', () => {
         ],
       });
 
-    expect(matchRes.status).toBe(200);
+    expect(matchRes).toHaveStatus(200);
     const bundle = matchRes.body as Bundle<Patient>;
     // All results must be 'certain' grade
     for (const entry of bundle.entry ?? []) {
@@ -362,7 +362,7 @@ describe('Patient $match Operation', () => {
         ],
       });
 
-    expect(matchRes.status).toBe(200);
+    expect(matchRes).toHaveStatus(200);
     const bundle = matchRes.body as Bundle<Patient>;
     expect((bundle.entry ?? []).length).toBeLessThanOrEqual(2);
   });
@@ -397,7 +397,7 @@ describe('Patient $match Operation', () => {
         birthDate,
         telecom: [{ system: 'phone', value: phone }],
       });
-      expect(created.status).toBe(201);
+      expect(created).toHaveStatus(201);
 
       // First name + DOB + phone uniquely identify the patient (with different phone formatting).
       const res = await cmsMatch({
@@ -407,7 +407,7 @@ describe('Patient $match Operation', () => {
         telecom: [{ system: 'phone', value: phone }],
       });
 
-      expect(res.status).toBe(200);
+      expect(res).toHaveStatus(200);
       const bundle = res.body as Bundle<Patient>;
       expect(bundle.entry).toHaveLength(1);
       const entry = bundle.entry?.[0];
@@ -443,14 +443,14 @@ describe('Patient $match Operation', () => {
         telecom: [{ system: 'phone', value: phone }],
       });
 
-      expect(res.status).toBe(200);
+      expect(res).toHaveStatus(200);
       const bundle = res.body as Bundle<Patient>;
       expect(bundle.entry ?? []).toHaveLength(0);
     });
 
     test('no match when only a single non-discriminating field agrees', async () => {
       const res = await cmsMatch({ resourceType: 'Patient', birthDate: '1973-09-25', name: [{ given: ['Solo'] }] });
-      expect(res.status).toBe(200);
+      expect(res).toHaveStatus(200);
       expect((res.body as Bundle<Patient>).entry ?? []).toHaveLength(0);
     });
 
@@ -468,8 +468,73 @@ describe('Patient $match Operation', () => {
         birthDate: '1975-03-22',
       });
 
-      expect(res.status).toBe(200);
+      expect(res).toHaveStatus(200);
       expect((res.body as Bundle<Patient>).entry ?? []).toHaveLength(0);
+    });
+
+    test('finds and releases a candidate whose DOB is one day off (rule 01, DOB*)', async () => {
+      const family = `CmsDobTolerance${Date.now()}`;
+      const street = '48 Brattle Street';
+      const created = await createPatient({
+        resourceType: 'Patient',
+        name: [{ family, given: ['Theodora'] }],
+        birthDate: '1980-04-10',
+        address: [{ line: [street] }],
+      });
+      expect(created).toHaveStatus(201);
+
+      // No identifier or telecom, so the candidate can only be found by the name + DOB range search
+      const res = await cmsMatch({
+        resourceType: 'Patient',
+        name: [{ family, given: ['Theodora'] }],
+        birthDate: '1980-04-11',
+        address: [{ line: [street] }],
+      });
+
+      expect(res).toHaveStatus(200);
+      const bundle = res.body as Bundle<Patient>;
+      expect(bundle.entry).toHaveLength(1);
+      const entry = bundle.entry?.[0];
+      expect(entry?.resource?.id).toBe(created.body.id);
+      const ext = entry?.search?.extension ?? [];
+      expect(ext.find((e) => e.url.endsWith('cms-match-combination'))?.valueString).toBe('01');
+      expect(ext.find((e) => e.url.endsWith('cms-match-type'))?.valueCode).toBe('fuzzy');
+    });
+
+    test('requires an exact first name when another candidate shares the DOB (twin guardrail)', async () => {
+      const family = `CmsTwin${Date.now()}`;
+      const birthDate = '2015-05-05';
+      const ssn = { system: 'http://hl7.org/fhir/sid/us-ssn', value: '321-54-8765' };
+      const jayden = await createPatient({
+        resourceType: 'Patient',
+        name: [{ family, given: ['Jayden'] }],
+        birthDate,
+        identifier: [ssn],
+      });
+      expect(jayden).toHaveStatus(201);
+
+      // "Jaydan" is one edit from "Jayden", so fuzzy First Name + Last Name + DOB + SSN Last 4 qualifies (rule 04)
+      const query: Patient = {
+        resourceType: 'Patient',
+        name: [{ family, given: ['Jaydan'] }],
+        birthDate,
+        identifier: [ssn],
+      };
+      const before = await cmsMatch(query);
+      expect(before).toHaveStatus(200);
+      const beforeEntries = (before.body as Bundle<Patient>).entry ?? [];
+      expect(beforeEntries.map((e) => e.resource?.id)).toStrictEqual([jayden.body.id]);
+      expect(
+        beforeEntries[0].search?.extension?.find((e) => e.url.endsWith('cms-match-combination'))?.valueString
+      ).toBe('04');
+
+      // A twin sharing the DOB means the fuzzy first name can no longer be trusted
+      const twin = await createPatient({ resourceType: 'Patient', name: [{ family, given: ['Brandon'] }], birthDate });
+      expect(twin).toHaveStatus(201);
+
+      const after = await cmsMatch(query);
+      expect(after).toHaveStatus(200);
+      expect((after.body as Bundle<Patient>).entry ?? []).toHaveLength(0);
     });
   });
 });

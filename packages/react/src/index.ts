@@ -20,7 +20,9 @@ export * from './AttachmentDisplay/AttachmentDisplay';
 export * from './AttachmentInput/AttachmentInput';
 export * from './auth/ChangePasswordForm';
 export * from './auth/ChooseScopeForm';
+export * from './auth/MfaEnrollForm';
 export * from './auth/MfaForm';
+export * from './auth/MfaVerificationForm';
 export * from './auth/RegisterForm';
 export * from './auth/ResetPasswordForm';
 export * from './auth/SetPasswordForm';
@@ -70,12 +72,14 @@ export * from './Loading/Loading';
 export * from './Logo/Logo';
 export * from './MeasureReportDisplay/MeasureReportDisplay';
 export * from './MedplumLink/MedplumLink';
+export * from './Modal/Modal';
 export * from './MoneyDisplay/MoneyDisplay';
 export * from './MoneyInput/MoneyInput';
 export * from './NoteDisplay/NoteDisplay';
 export * from './NotificationIcon/NotificationIcon';
 export * from './OperationOutcomeAlert/OperationOutcomeAlert';
 export * from './Panel/Panel';
+export * from './PasswordInput/PasswordInput';
 export * from './PatientAccountsForm/PatientAccountsForm';
 export * from './PatientExportForm/PatientExportForm';
 export * from './PatientHeader/PatientHeader';
@@ -87,6 +91,8 @@ export * from './PatientSummary/PharmacyDialog';
 export {
   AllergiesSection,
   DemographicsSection,
+  GoalsSection,
+  ImmunizationsSection,
   InsuranceSection,
   LabsSection,
   MedicationsSection,
@@ -103,6 +109,7 @@ export { summaryResourceListSection } from './PatientSummary/SummaryResourceList
 export type { SummaryResourceListOptions } from './PatientSummary/SummaryResourceListSection';
 export * from './PatientTimeline/PatientTimeline';
 export * from './PlanDefinitionBuilder/PlanDefinitionBuilder';
+export * from './QrCodeScanner/QrCodeScanner';
 export * from './QuantityDisplay/QuantityDisplay';
 export * from './QuantityInput/QuantityInput';
 export * from './QuestionnaireBuilder/QuestionnaireBuilder';
@@ -148,6 +155,7 @@ export * from './SmartAppLaunchLink/SmartAppLaunchLink';
 export * from './StatusBadge/StatusBadge';
 export * from './Timeline/Timeline';
 export * from './TimingInput/TimingInput';
+export * from './UnavailableNote/UnavailableNote';
 export * from './utils/app';
 export * from './utils/date';
 export * from './utils/dom';

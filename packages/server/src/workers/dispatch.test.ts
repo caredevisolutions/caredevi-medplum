@@ -1,14 +1,13 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { DeleteFunctionCommand, LambdaClient, ResourceNotFoundException } from '@aws-sdk/client-lambda';
-import { createReference } from '@medplum/core';
 import type { Bot, Patient } from '@medplum/fhirtypes';
 import type { AwsClientStub } from 'aws-sdk-client-mock';
 import { mockClient } from 'aws-sdk-client-mock';
 import { vi } from 'vitest';
 import { initAppServices, shutdownApp } from '../app';
-import { loadTestConfig } from '../config/loader';
-import { Repository } from '../fhir/repo';
+import { getConfig, loadTestConfig } from '../config/loader';
+import type { Repository } from '../fhir/repo';
 import { getLogger } from '../logger';
 import { createTestProject, withTestContext } from '../test.setup';
 import { findAndExecDispatchJob } from './test-utils';
@@ -21,12 +20,8 @@ describe('Dispatch Worker', () => {
     const config = await loadTestConfig();
     await initAppServices(config);
 
-    const botProjectDetails = await createTestProject({ withClient: true });
-    botRepo = new Repository({
-      extendedMode: true,
-      projects: [botProjectDetails.project],
-      author: createReference(botProjectDetails.client),
-    });
+    const botProjectDetails = await createTestProject({ withClient: true, withRepo: true });
+    botRepo = botProjectDetails.repo;
   });
 
   afterAll(async () => {
@@ -34,6 +29,7 @@ describe('Dispatch Worker', () => {
   });
 
   beforeEach(() => {
+    getConfig().dispatchEnabled = true;
     mockLambdaClient = mockClient(LambdaClient);
     mockLambdaClient.on(DeleteFunctionCommand).resolves({});
   });
@@ -57,6 +53,23 @@ describe('Dispatch Worker', () => {
     const expectedName = `medplum-bot-lambda-${bot.id}`;
     expect(mockLambdaClient.commandCalls(DeleteFunctionCommand, { FunctionName: expectedName })).toHaveLength(1);
     expect(mockLambdaClient.commandCalls(DeleteFunctionCommand)).toHaveLength(1);
+  });
+
+  test('does not dispatch jobs when disabled', async () => {
+    getConfig().dispatchEnabled = false;
+
+    const bot = await withTestContext(() =>
+      botRepo.createResource<Bot>({
+        resourceType: 'Bot',
+        name: 'lambda-bot-disabled',
+        runtimeVersion: 'awslambda',
+      })
+    );
+
+    await withTestContext(() => botRepo.deleteResource('Bot', bot.id));
+    await expect(findAndExecDispatchJob(bot, 'delete')).resolves.toBeUndefined();
+
+    expect(mockLambdaClient.commandCalls(DeleteFunctionCommand)).toHaveLength(0);
   });
 
   test('does not interact with Lambda when Bot runtimeVersion is not awslambda', async () => {

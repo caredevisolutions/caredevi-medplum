@@ -6,10 +6,10 @@ import { initAppServices, shutdownApp } from '../../app';
 import { loadTestConfig } from '../../config/loader';
 import { DatabaseMode, getDatabasePool } from '../../database';
 import { withTestContext } from '../../test.setup';
-import { getGlobalSystemRepo } from '../repo';
+import { getTestProjectSystemRepo } from '../repository/test-utils';
 
 describe('ConceptMapping lookup table', () => {
-  const systemRepo = getGlobalSystemRepo();
+  const systemRepo = getTestProjectSystemRepo();
 
   const conceptMap: ConceptMap = {
     resourceType: 'ConceptMap',
@@ -60,7 +60,7 @@ describe('ConceptMapping lookup table', () => {
         'SELECT "sourceCode", "targetCode" FROM "ConceptMapping" WHERE "conceptMap" = $1',
         [systemResource.id]
       );
-      expect(results.rows.map((r) => `${r.sourceCode} => ${r.targetCode}`).sort()).toStrictEqual([
+      expect(results.rows.map((r) => `${r.sourceCode} => ${r.targetCode}`)).toContainExactly([
         `271649006 => 8480-6`,
         `271650006 => 8462-4`,
       ]);
@@ -76,7 +76,7 @@ describe('ConceptMapping lookup table', () => {
         'SELECT "sourceCode", "targetCode" FROM "ConceptMapping" WHERE "conceptMap" = $1',
         [systemResource.id]
       );
-      expect(results.rows.map((r) => `${r.sourceCode} => ${r.targetCode}`).sort()).toStrictEqual([
+      expect(results.rows.map((r) => `${r.sourceCode} => ${r.targetCode}`)).toContainExactly([
         `271649006 => 8480-6`,
         `271650006 => 8462-4`,
       ]);

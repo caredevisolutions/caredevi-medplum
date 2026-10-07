@@ -8,12 +8,11 @@ import type { AwsClientStub } from 'aws-sdk-client-mock';
 import { mockClient } from 'aws-sdk-client-mock';
 import { randomUUID } from 'crypto';
 import { simpleParser } from 'mailparser';
-import type Mail from 'nodemailer/lib/mailer';
 import { Readable } from 'stream';
 import { vi } from 'vitest';
 import { initAppServices, shutdownApp } from '../app';
 import { getConfig, loadTestConfig } from '../config/loader';
-import { getGlobalSystemRepo } from '../fhir/repo';
+import { getTestProjectSystemRepo } from '../fhir/repository/test-utils';
 import { globalLogger } from '../logger';
 import { getBinaryStorage } from '../storage/loader';
 import { withTestContext } from '../test.setup';
@@ -31,7 +30,7 @@ vi.mock('nodemailer', () => ({
 }));
 
 describe('Email', () => {
-  const systemRepo = getGlobalSystemRepo();
+  const systemRepo = getTestProjectSystemRepo();
   let mockSESv2Client: AwsClientStub<SESv2Client>;
 
   beforeAll(async () => {
@@ -201,7 +200,7 @@ describe('Email', () => {
     await sendEmail(systemRepo, {
       to: 'alice@example.com',
       cc: null as unknown as string,
-      bcc: [null as unknown as string, {} as unknown as Mail.Address],
+      bcc: [null as unknown as string, {}],
       subject: 'Hello',
       text: 'Hello Alice',
     });
@@ -450,6 +449,48 @@ describe('Email', () => {
 
       expect(mockSendMail).toHaveBeenCalledTimes(1);
       expect(mockSendMail.mock.calls[0][0].from).toBe('default@project.example.com');
+    });
+
+    test('appName becomes the From display name', async () => {
+      const project = makeProject(baseSecrets);
+      project.setting = [{ name: 'appName', valueString: 'Acme Health' }];
+      await sendEmail(systemRepo, { to: 'alice@example.com', subject: 'Hello', text: 'Hello Alice' }, project);
+
+      expect(mockSendMail).toHaveBeenCalledTimes(1);
+      expect(mockSendMail.mock.calls[0][0].from).toStrictEqual({
+        name: 'Acme Health',
+        address: 'noreply@project.example.com',
+      });
+      // The envelope sender stays a bare address.
+      expect(mockSendMail.mock.calls[0][0].sender).toBe('noreply@project.example.com');
+    });
+
+    test('A display name in smtpFromAddress overrides appName', async () => {
+      const project = makeProject([
+        { name: 'smtpHost', valueString: 'smtp.project.example.com' },
+        { name: 'smtpPort', valueInteger: 587 },
+        { name: 'smtpUsername', valueString: 'projectuser' },
+        { name: 'smtpPassword', valueString: 'projectpass' },
+        { name: 'smtpFromAddress', valueString: '"Acme Billing" <noreply@project.example.com>' },
+      ]);
+      project.setting = [{ name: 'appName', valueString: 'Acme Health' }];
+      await sendEmail(systemRepo, { to: 'alice@example.com', subject: 'Hello', text: 'Hello Alice' }, project);
+
+      expect(mockSendMail).toHaveBeenCalledTimes(1);
+      expect(mockSendMail.mock.calls[0][0].from).toBe('"Acme Billing" <noreply@project.example.com>');
+    });
+
+    test('appName does not rebrand the server sender', async () => {
+      // Without project SMTP the message really does come from the server's
+      // sender domain, so attaching the project's app name would be a mismatch.
+      const project = makeProject([]);
+      project.setting = [{ name: 'appName', valueString: 'Acme Health' }];
+      await sendEmail(systemRepo, { to: 'alice@example.com', subject: 'Hello', text: 'Hello Alice' }, project);
+
+      expect(mockSendMail).not.toHaveBeenCalled();
+      expect(mockSESv2Client.send.callCount).toBe(1);
+      const inputArgs = mockSESv2Client.commandCalls(SendEmailCommand)[0].args[0].input;
+      expect(inputArgs?.FromEmailAddress).toBe(getConfig().supportEmail);
     });
 
     test('Missing smtpFromAddress fails loudly', async () => {

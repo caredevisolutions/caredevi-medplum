@@ -8,17 +8,17 @@ import { Readable } from 'stream';
 import request from 'supertest';
 import { initApp, shutdownApp } from '../app';
 import { loadTestConfig } from '../config/loader';
-import type { MedplumServerConfig } from '../config/types';
-import { getGlobalSystemRepo } from '../fhir/repo';
+import type { ServerConfig } from '../config/utils';
+import { getTestProjectSystemRepo } from '../fhir/repository/test-utils';
 import { createTestProject, withTestContext } from '../test.setup';
 import { getBinaryStorage } from './loader';
 
 const app = express();
-let config: MedplumServerConfig;
+let config: ServerConfig;
 let binary: Binary;
 
 describe('Storage Routes', () => {
-  const systemRepo = getGlobalSystemRepo();
+  const systemRepo = getTestProjectSystemRepo();
   beforeAll(async () => {
     config = await loadTestConfig();
     await initApp(app, config);
@@ -44,19 +44,19 @@ describe('Storage Routes', () => {
 
   test('Missing signature', async () => {
     const res = await request(app).get(`/storage/${binary.id}?Expires=123`);
-    expect(res.status).toBe(401);
+    expect(res).toHaveStatus(401);
   });
 
   test('Missing expires', async () => {
     const res = await request(app).get(`/storage/${binary.id}?Signature=xyz`);
-    expect(res.status).toBe(410);
+    expect(res).toHaveStatus(410);
   });
 
   test('Invalid signature', async () => {
     const dateLessThan = new Date();
     dateLessThan.setHours(dateLessThan.getHours() + 1);
     const res = await request(app).get(`/storage/${binary.id}?Signature=xyz&Expires=${dateLessThan.getTime()}`);
-    expect(res.status).toBe(401);
+    expect(res).toHaveStatus(401);
   });
 
   test('Success', async () => {
@@ -75,7 +75,7 @@ describe('Storage Routes', () => {
 
     // And finally, we can execute the request
     const res = await req;
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
   });
 
   test('Binary not found', async () => {
@@ -87,7 +87,7 @@ describe('Storage Routes', () => {
       contentType: ContentType.TEXT,
     });
     const res = await req;
-    expect(res.status).toBe(404);
+    expect(res).toHaveStatus(404);
   });
 
   test('File not found', async () => {
@@ -104,7 +104,7 @@ describe('Storage Routes', () => {
     config.storageBaseUrl = req.url + 'storage/';
     req.url = await getBinaryStorage().getPresignedUrl(resource);
     const res = await req;
-    expect(res.status).toBe(404);
+    expect(res).toHaveStatus(404);
   });
 
   test('Write success', async () => {
@@ -123,7 +123,7 @@ describe('Storage Routes', () => {
 
     // And finally, we can execute the request
     const res = await req.send('foo bar baz quux');
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
   });
 
   test('Write mismatched content type', async () => {
@@ -142,24 +142,24 @@ describe('Storage Routes', () => {
 
     // And finally, we can execute the request
     const res = await req.set('content-type', 'application/json').send('{}');
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
   });
 
   test('Write missing signature', async () => {
     const res = await request(app).put(`/storage/${binary.id}?Expires=123`);
-    expect(res.status).toBe(401);
+    expect(res).toHaveStatus(401);
   });
 
   test('Write missing expires', async () => {
     const res = await request(app).put(`/storage/${binary.id}?Signature=xyz`);
-    expect(res.status).toBe(410);
+    expect(res).toHaveStatus(410);
   });
 
   test('Write invalid signature', async () => {
     const dateLessThan = new Date();
     dateLessThan.setHours(dateLessThan.getHours() + 1);
     const res = await request(app).put(`/storage/${binary.id}?Signature=xyz&Expires=${dateLessThan.getTime()}`);
-    expect(res.status).toBe(401);
+    expect(res).toHaveStatus(401);
   });
 
   describe('Project query param', () => {
@@ -167,10 +167,10 @@ describe('Storage Routes', () => {
     let projectBinary: Binary;
 
     beforeAll(async () => {
-      const { project } = await createTestProject();
+      const { project, repo } = await createTestProject({ withRepo: true });
       projectId = project.id;
       projectBinary = await withTestContext(async () => {
-        return systemRepo.createResource<Binary>({
+        return repo.createResource<Binary>({
           resourceType: 'Binary',
           contentType: ContentType.TEXT,
           meta: { project: projectId },
@@ -206,7 +206,7 @@ describe('Storage Routes', () => {
       config.storageBaseUrl = req.url + 'storage/';
       req.url = await getBinaryStorage().getPresignedUrl(projectBinary);
       const res = await req;
-      expect(res.status).toBe(200);
+      expect(res).toHaveStatus(200);
     });
 
     test('GET tampered Project fails signature', async () => {
@@ -215,7 +215,7 @@ describe('Storage Routes', () => {
       const url = await getBinaryStorage().getPresignedUrl(projectBinary);
       req.url = url.replace(`Project=${projectId}`, `Project=${randomUUID()}`);
       const res = await req;
-      expect(res.status).toBe(401);
+      expect(res).toHaveStatus(401);
     });
 
     test('PUT success with Project param', async () => {
@@ -223,7 +223,7 @@ describe('Storage Routes', () => {
       config.storageBaseUrl = req.url + 'storage/';
       req.url = await getBinaryStorage().getPresignedUrl(projectBinary, { upload: true });
       const res = await req.send('project upload content');
-      expect(res.status).toBe(200);
+      expect(res).toHaveStatus(200);
     });
 
     test('PUT tampered Project fails signature', async () => {
@@ -232,7 +232,7 @@ describe('Storage Routes', () => {
       const url = await getBinaryStorage().getPresignedUrl(projectBinary, { upload: true });
       req.url = url.replace(`Project=${projectId}`, `Project=${randomUUID()}`);
       const res = await req.send('tampered');
-      expect(res.status).toBe(401);
+      expect(res).toHaveStatus(401);
     });
   });
 });

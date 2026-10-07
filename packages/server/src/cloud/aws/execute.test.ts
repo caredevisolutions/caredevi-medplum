@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { InvokeCommand, LambdaClient, ListLayerVersionsCommand } from '@aws-sdk/client-lambda';
+import {
+  InvokeCommand,
+  LambdaClient,
+  ListLayerVersionsCommand,
+  ResourceNotFoundException,
+} from '@aws-sdk/client-lambda';
 import { badRequest, ContentType } from '@medplum/core';
 import type { Bot } from '@medplum/fhirtypes';
 import type { AwsClientStub } from 'aws-sdk-client-mock';
@@ -13,7 +18,7 @@ import { initApp, shutdownApp } from '../../app';
 import { getConfig, loadTestConfig } from '../../config/loader';
 import { getBinaryStorage } from '../../storage/loader';
 import { initTestAuth } from '../../test.setup';
-import { getLambdaFunctionName } from './execute';
+import { getLambdaFunctionName, normalizeLambdaExecutionError } from './execute';
 
 const app = express();
 let accessToken: string;
@@ -71,7 +76,7 @@ describe('Execute', () => {
           }
         `,
       });
-    expect(res.status).toBe(201);
+    expect(res).toHaveStatus(201);
     bot = res.body as Bot;
   });
 
@@ -85,7 +90,7 @@ describe('Execute', () => {
       .set('Content-Type', ContentType.TEXT)
       .set('Authorization', 'Bearer ' + accessToken)
       .send('input');
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
     expect(res.headers['content-type']).toBe('text/plain; charset=utf-8');
     expect(res.text).toStrictEqual('input');
   });
@@ -99,7 +104,7 @@ describe('Execute', () => {
         resourceType: 'Patient',
         name: [{ given: ['John'], family: ['Doe'] }],
       });
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
     expect(res.headers['content-type']).toBe('application/fhir+json; charset=utf-8');
   });
 
@@ -111,7 +116,7 @@ describe('Execute', () => {
         resourceType: 'Patient',
         name: [{ given: ['John'], family: ['Doe'] }],
       });
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
     expect(res.headers['content-type']).toBe('application/fhir+json; charset=utf-8');
   });
 
@@ -128,7 +133,7 @@ describe('Execute', () => {
       .set('Content-Type', ContentType.HL7_V2)
       .set('Authorization', 'Bearer ' + accessToken)
       .send(text);
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
     expect(res.headers['content-type']).toBe('x-application/hl7-v2+er7; charset=utf-8');
     expect(writeFileSpy).toHaveBeenCalledTimes(1);
 
@@ -154,7 +159,7 @@ describe('Execute', () => {
         name: 'Test Bot',
         code: '',
       });
-    expect(res1.status).toBe(201);
+    expect(res1).toHaveStatus(201);
     const bot = res1.body as Bot;
 
     // Execute the bot
@@ -163,7 +168,7 @@ describe('Execute', () => {
       .set('Content-Type', ContentType.FHIR_JSON)
       .set('Authorization', 'Bearer ' + accessToken)
       .send({});
-    expect(res2.status).toBe(400);
+    expect(res2).toHaveStatus(400);
   });
 
   test('Unsupported runtime version', async () => {
@@ -176,7 +181,7 @@ describe('Execute', () => {
         name: 'Test Bot',
         runtimeVersion: 'unsupported',
       });
-    expect(res1.status).toBe(201);
+    expect(res1).toHaveStatus(201);
     const bot = res1.body as Bot;
 
     // Step 2: Publish the bot
@@ -192,7 +197,7 @@ describe('Execute', () => {
         }
         `,
       });
-    expect(res2.status).toBe(200);
+    expect(res2).toHaveStatus(200);
 
     // Step 3: Execute the bot
     const res3 = await request(app)
@@ -200,7 +205,7 @@ describe('Execute', () => {
       .set('Content-Type', ContentType.FHIR_JSON)
       .set('Authorization', 'Bearer ' + accessToken)
       .send({});
-    expect(res3.status).toBe(400);
+    expect(res3).toHaveStatus(400);
   });
 
   test('Get function name', async () => {
@@ -228,7 +233,7 @@ describe('Execute', () => {
       .set('Content-Type', ContentType.TEXT)
       .set('Authorization', 'Bearer ' + accessToken)
       .send('input');
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
     expect(res.headers['content-type']).toBe('text/plain; charset=utf-8');
     expect(res.text).toStrictEqual('input');
   });
@@ -245,7 +250,40 @@ describe('Execute', () => {
       .set('Content-Type', ContentType.FHIR_JSON)
       .set('Authorization', 'Bearer ' + accessToken)
       .send({});
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect(res.body).toMatchObject(outcome);
+  });
+
+  test('Execute bot that has not been deployed', async () => {
+    mockLambdaClient
+      .on(InvokeCommand)
+      .rejects(new ResourceNotFoundException({ $metadata: {}, message: 'Function not found' }));
+
+    const res = await request(app)
+      .post(`/fhir/R4/Bot/${bot.id}/$execute`)
+      .set('Content-Type', ContentType.FHIR_JSON)
+      .set('Authorization', 'Bearer ' + accessToken)
+      .send({});
+    expect(res).toHaveStatus(400);
+    expect(res.body.issue[0].details.text).toStrictEqual(
+      'Bot "Test Bot" is not deployed. Deploy the bot with Bot/$deploy and try again.'
+    );
+  });
+});
+
+describe('normalizeLambdaExecutionError', () => {
+  test('Missing function falls back to the bot id when unnamed', () => {
+    expect(
+      normalizeLambdaExecutionError(new ResourceNotFoundException({ $metadata: {}, message: 'Function not found' }), {
+        resourceType: 'Bot',
+        id: 'abc',
+      })
+    ).toBe('Bot "abc" is not deployed. Deploy the bot with Bot/$deploy and try again.');
+  });
+
+  test('Other errors are passed through', () => {
+    expect(
+      normalizeLambdaExecutionError(new Error('Rate exceeded'), { resourceType: 'Bot', id: 'abc', name: 'My Bot' })
+    ).toBe('Rate exceeded');
   });
 });

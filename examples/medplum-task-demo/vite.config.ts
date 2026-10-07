@@ -6,8 +6,8 @@ import { defineConfig } from 'vite';
 
 dns.setDefaultResultOrder('verbatim');
 
-if (!existsSync(path.join(__dirname, '.env'))) {
-  copyFileSync(path.join(__dirname, '.env.defaults'), path.join(__dirname, '.env'));
+if (!existsSync(path.join(import.meta.dirname, '.env'))) {
+  copyFileSync(path.join(import.meta.dirname, '.env.defaults'), path.join(import.meta.dirname, '.env'));
 }
 
 dns.setDefaultResultOrder('verbatim');
@@ -21,6 +21,7 @@ export default defineConfig({
     port: 3000,
   },
   test: {
+    maxWorkers: process.env.TEST_MAX_WORKERS ?? '50%',
     globals: true,
   },
 });

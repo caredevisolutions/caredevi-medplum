@@ -7,7 +7,7 @@ import request from 'supertest';
 import { initApp, shutdownApp } from '../../app';
 import { loadTestConfig } from '../../config/loader';
 import { DatabaseMode, getDatabasePool } from '../../database';
-import { initTestAuth, waitForAsyncJob } from '../../test.setup';
+import { getSuperAdminAccessToken, waitForAsyncJob } from '../../test.setup';
 
 describe('db-configure-indexes', () => {
   const app = express();
@@ -20,7 +20,7 @@ describe('db-configure-indexes', () => {
   beforeAll(async () => {
     const config = await loadTestConfig();
     await initApp(app, config);
-    accessToken = await initTestAuth({ project: { superAdmin: true } });
+    accessToken = await getSuperAdminAccessToken();
 
     // Create a test table
     const client = getDatabasePool(DatabaseMode.WRITER);
@@ -50,7 +50,7 @@ describe('db-configure-indexes', () => {
           },
         ],
       });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect(res.body).toMatchObject({
       resourceType: 'OperationOutcome',
       issue: [
@@ -78,7 +78,7 @@ describe('db-configure-indexes', () => {
           },
         ],
       });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect(res.body).toMatchObject({
       resourceType: 'OperationOutcome',
       issue: [
@@ -106,7 +106,7 @@ describe('db-configure-indexes', () => {
           },
         ],
       });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect(res.body).toMatchObject({
       resourceType: 'OperationOutcome',
       issue: [
@@ -150,13 +150,13 @@ describe('db-configure-indexes', () => {
           },
         ],
       });
-    expect(res.status).toBe(202);
+    expect(res).toHaveStatus(202);
 
     const asyncJob = await waitForAsyncJob(res.headers['content-location'], app, accessToken);
 
     expect(asyncJob.output).toStrictEqual({
       resourceType: 'Parameters',
-      parameter: expect.toEqualUnordered([
+      parameter: expect.toContainExactly([
         {
           name: 'action',
           part: [
@@ -208,13 +208,13 @@ describe('db-configure-indexes', () => {
           },
         ],
       });
-    expect(res.status).toBe(202);
+    expect(res).toHaveStatus(202);
 
     const asyncJob = await waitForAsyncJob(res.headers['content-location'], app, accessToken);
 
     expect(asyncJob.output).toStrictEqual({
       resourceType: 'Parameters',
-      parameter: expect.toEqualUnordered([
+      parameter: expect.toContainExactly([
         {
           name: 'action',
           part: [
@@ -287,7 +287,7 @@ describe('db-configure-indexes', () => {
           },
         ],
       });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect(res.body).toMatchObject({
       resourceType: 'OperationOutcome',
       issue: [

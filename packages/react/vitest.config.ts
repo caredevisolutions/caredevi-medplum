@@ -3,7 +3,7 @@
 import react from '@vitejs/plugin-react';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vitest/config';
-import { medplumAliases } from '../../vitest.config';
+import { medplumAliases } from '../../aliases.mjs';
 
 export default defineConfig({
   plugins: [
@@ -31,6 +31,8 @@ export default defineConfig({
     },
   },
   test: {
+    name: '@medplum/react',
+    maxWorkers: process.env.TEST_MAX_WORKERS ?? '50%',
     globals: true,
     environment: 'jsdom',
     environmentOptions: {
@@ -41,6 +43,7 @@ export default defineConfig({
     },
     setupFiles: ['./src/test.setup.ts'],
     testTimeout: 10_000,
+    pool: 'threads',
     fakeTimers: {
       /*
        * Advance mocked timers automatically (e.g. debounced search inputs) instead of
@@ -48,11 +51,5 @@ export default defineConfig({
        */
       shouldAdvanceTime: true,
     },
-    /*
-     * Run test files sequentially in isolated fork processes. React tests share global
-     * FHIR indexes and jsdom polyfills from test.setup.ts; parallel file runs cause flaky tests
-     */
-    pool: 'forks',
-    fileParallelism: false,
   },
 });

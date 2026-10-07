@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { allOk, ContentType, isNotFound, isOk, OperationOutcomeError, stringify } from '@medplum/core';
-import type { BatchEvent, FhirRequest, HttpMethod } from '@medplum/fhir-router';
+import type { FhirRequest, HttpMethod } from '@medplum/fhir-router';
 import { FhirRouter } from '@medplum/fhir-router';
 import type { ResourceType } from '@medplum/fhirtypes';
 import type { NextFunction, Request, Response } from 'express';
@@ -10,7 +10,7 @@ import { awsTextractHandler } from '../cloud/aws/textract';
 import { getConfig } from '../config/loader';
 import { getAuthenticatedContext, tryGetRequestContext } from '../context';
 import { authenticateRequest } from '../oauth/middleware';
-import { recordHistogramValue } from '../otel/otel';
+import { addBatchTelemetryListeners } from './batch-telemetry';
 import { bulkDataRouter } from './bulkdata';
 import { jobRouter } from './job';
 import { getCapabilityStatement } from './metadata';
@@ -24,13 +24,14 @@ import { agentUpgradeHandler } from './operations/agentupgrade';
 import { aiOperationHandler } from './operations/ai';
 import { asyncJobCancelHandler } from './operations/asyncjobcancel';
 import { binaryPresignedUrlHandler } from './operations/binary-presigned-url';
+import { binaryScanHandler } from './operations/binary-scan';
 import { appointmentBookHandler } from './operations/book';
 import { botInitHandler } from './operations/botinit';
 import { appointmentCancelHandler } from './operations/cancel';
 import { ccdaExportHandler } from './operations/ccdaexport';
 import { chargeItemDefinitionApplyHandler } from './operations/chargeitemdefinitionapply';
 import { claimExportGetHandler, claimExportPostHandler } from './operations/claimexport';
-import { claimSubmitGetHandler, claimSubmitPostHandler } from './operations/claimsubmit';
+import { claimSubmitPostByIdHandler, claimSubmitPostHandler } from './operations/claimsubmit';
 import { clearAllWsSubsHandler } from './operations/clearallwssubs';
 import { codeSystemImportHandler } from './operations/codesystemimport';
 import { codeSystemLookupHandler } from './operations/codesystemlookup';
@@ -38,11 +39,16 @@ import { codeSystemValidateCodeHandler } from './operations/codesystemvalidateco
 import { conceptMapImportHandler } from './operations/conceptmapimport';
 import { conceptMapTranslateHandler } from './operations/conceptmaptranslate';
 import { appointmentConfirmHandler } from './operations/confirm';
+import {
+  coverageEligibilitySubmitPostByIdHandler,
+  coverageEligibilitySubmitPostHandler,
+} from './operations/coverageeligibilityrequestsubmit';
 import { csvHandler } from './operations/csv';
 import { tryCustomOperation } from './operations/custom';
 import { getColumnStatisticsHandler } from './operations/db-column-statistics';
 import { configureColumnStatisticsHandler } from './operations/db-configure-column-statistics';
 import { dbConfigureIndexesHandler } from './operations/db-configure-indexes';
+import { dbIndexBloatHandler } from './operations/db-index-bloat';
 import { dbIndexesHandler } from './operations/dbindexes';
 import { dbInvalidIndexesHandler } from './operations/dbinvalidindexes';
 import { dbSchemaDiffHandler } from './operations/dbschemadiff';
@@ -70,17 +76,15 @@ import { planDefinitionApplyHandler } from './operations/plandefinitionapply';
 import { projectRateLimitsHandler } from './operations/project-rate-limits';
 import { projectCloneHandler } from './operations/projectclone';
 import { projectInitHandler } from './operations/projectinit';
+import { rebuildBaseDefinitionsOperation } from './operations/rebuild-base-definitions';
 import { refreshReferenceDisplayHandler } from './operations/refresh-reference-display';
+import { appointmentRescheduleHandler } from './operations/reschedule';
 import { userRescopeOperation } from './operations/rescope';
 import { resourceGraphHandler } from './operations/resourcegraph';
 import { rotateSecretHandler } from './operations/rotatesecret';
 import { setAccountsHandler } from './operations/set-accounts';
 import { generateSmartHealthCardHandler, verifySmartHealthCardHandler } from './operations/smarthealthcards';
-import {
-  generateSmartHealthLinkHandler,
-  resolveSmartHealthLinkHandler,
-  smartHealthLinkManifestHandler,
-} from './operations/smarthealthlinks';
+import { generateSmartHealthLinkHandler, resolveSmartHealthLinkHandler } from './operations/smarthealthlinks';
 import { structureDefinitionExpandProfileHandler } from './operations/structuredefinitionexpandprofile';
 import { codeSystemSubsumesOperation } from './operations/subsumes';
 import { updateUserEmailOperation } from './operations/update-user-email';
@@ -175,7 +179,6 @@ publicRoutes.get(['/$versions', '/%24versions'], (_req: Request, res: Response) 
 // See: https://build.fhir.org/ig/HL7/smart-app-launch/conformance.html#sample-request
 publicRoutes.get('/.well-known/smart-configuration', smartConfigurationHandler);
 publicRoutes.get('/.well-known/smart-styles.json', smartStylingHandler);
-publicRoutes.post('/.well-known/smart-health-links/:id/manifest.json', smartHealthLinkManifestHandler);
 
 // Protected routes require authentication
 const protectedRoutes = Router().use(authenticateRequest);
@@ -233,6 +236,9 @@ function initInternalFhirRouter(): FhirRouter {
   const router = new FhirRouter({
     introspectionEnabled: getConfig().introspectionEnabled,
   });
+
+  // Rebuild base definitions
+  router.add('POST', '/$rebuild-base-definitions', rebuildBaseDefinitionsOperation);
 
   // Project $export
   router.add('GET', '/$export', bulkExportHandler);
@@ -324,6 +330,9 @@ function initInternalFhirRouter(): FhirRouter {
   // Binary $presigned-url operation
   router.add('GET', '/Binary/:id/$presigned-url', binaryPresignedUrlHandler);
 
+  // Binary $scan operation
+  router.add('POST', '/Binary/:id/$scan', binaryScanHandler);
+
   // Bot $init operation
   router.add('POST', '/Bot/$init', botInitHandler);
 
@@ -334,10 +343,13 @@ function initInternalFhirRouter(): FhirRouter {
   router.add('POST', '/Claim/$export', claimExportPostHandler);
   router.add('GET', '/Claim/:id/$export', claimExportGetHandler);
 
-  // Claim $submit operation (dispatches to the custom operation configured via CLAIM_SUBMIT_OPERATION).
-  // POST passes the Claim via the 'resource' input parameter; GET reads the Claim from the URL.
+  // Claim $submit operation (dispatches to the configured claim or prior auth custom operation).
   router.add('POST', '/Claim/$submit', claimSubmitPostHandler);
-  router.add('GET', '/Claim/:id/$submit', claimSubmitGetHandler);
+  router.add('POST', '/Claim/:id/$submit', claimSubmitPostByIdHandler);
+
+  // CoverageEligibilityRequest $submit operation (dispatches to the configured eligibility custom operation).
+  router.add('POST', '/CoverageEligibilityRequest/$submit', coverageEligibilitySubmitPostHandler);
+  router.add('POST', '/CoverageEligibilityRequest/:id/$submit', coverageEligibilitySubmitPostByIdHandler);
 
   // Group $export operation
   router.add('GET', '/Group/:id/$export', groupExportHandler);
@@ -417,6 +429,7 @@ function initInternalFhirRouter(): FhirRouter {
   router.add('POST', '/Appointment/$hold', appointmentHoldHandler);
   router.add('POST', '/Appointment/:id/$cancel', appointmentCancelHandler);
   router.add('POST', '/Appointment/:id/$confirm', appointmentConfirmHandler);
+  router.add('POST', '/Appointment/:id/$reschedule', appointmentRescheduleHandler);
 
   // PackageRelease $install operation
   router.add('POST', '/PackageRelease/:id/$install', packageInstallHandler);
@@ -447,6 +460,7 @@ function initInternalFhirRouter(): FhirRouter {
 
   // Super admin operations
   router.add('POST', '/$db-stats', dbStatsHandler);
+  router.add('GET', '/$db-index-bloat', dbIndexBloatHandler);
   router.add('POST', '/$db-schema-diff', dbSchemaDiffHandler);
   router.add('POST', '/$db-invalid-indexes', dbInvalidIndexesHandler);
   router.add('GET', '/$get-ws-sub-stats', getWsSubStatsHandler);
@@ -462,24 +476,7 @@ function initInternalFhirRouter(): FhirRouter {
     const ctx = getAuthenticatedContext();
     ctx.logger.warn(e.message, { ...e.data, project: ctx.project.id });
   });
-
-  router.addEventListener('batch', (event: any) => {
-    const ctx = getAuthenticatedContext();
-    const projectId = ctx.project.id;
-    const { count, errors, size, bundleType } = event as BatchEvent;
-
-    const metricOpts = { attributes: { bundleType, projectId } };
-    if (count !== undefined) {
-      recordHistogramValue('medplum.batch.entries', count, metricOpts);
-    }
-    if (errors?.length) {
-      recordHistogramValue('medplum.batch.errors', errors.length, metricOpts);
-      ctx.logger.warn('Error processing batch', { bundleType, count, errors, size, project: projectId });
-    }
-    if (size !== undefined) {
-      recordHistogramValue('medplum.batch.size', size, metricOpts);
-    }
-  });
+  addBatchTelemetryListeners(router);
 
   return router;
 }

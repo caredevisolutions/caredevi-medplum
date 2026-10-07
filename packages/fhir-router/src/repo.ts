@@ -1,27 +1,40 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { SearchRequest, SortRule, WithId } from '@medplum/core';
+import type { Filter, Operation, SearchRequest, SortRule, WithId } from '@medplum/core';
 import {
   EMPTY,
   OperationOutcomeError,
   Operator,
   allOk,
+  applyPatch,
   badRequest,
   created,
   deepClone,
   evalFhirPath,
+  fhirpathPatchTypedValue,
   generateId,
+  getSearchResourceTypes,
   globalSchema,
   matchesSearchRequest,
   multipleMatches,
   normalizeOperationOutcome,
   notFound,
+  parseFhirPathPatchParameters,
+  parseSearchRequest,
   preconditionFailed,
   stringify,
+  toTypedValue,
 } from '@medplum/core';
-import type { Bundle, OperationOutcome, Parameters, Reference, Resource } from '@medplum/fhirtypes';
-import type { Operation } from 'rfc6902';
-import { applyPatch } from 'rfc6902';
+import type {
+  Bundle,
+  BundleEntry,
+  OperationOutcome,
+  Parameters,
+  Reference,
+  Resource,
+  ResourceType,
+} from '@medplum/fhirtypes';
+import { getExtraEntries } from './search-include';
 
 export type CreateResourceOptions = {
   assignedId?: boolean;
@@ -35,6 +48,14 @@ export type ReadHistoryOptions = {
   offset?: number;
   limit?: number;
 };
+
+/** One or more resource types, as a single type, an array, or a set. */
+export type ResourceTypeInput = ResourceType | readonly ResourceType[] | ReadonlySet<ResourceType>;
+
+export interface TransactionOptions {
+  readonly resourceTypes: ResourceTypeInput;
+  readonly serializable?: boolean;
+}
 
 export const RepositoryMode = {
   READER: 'reader',
@@ -164,7 +185,8 @@ export abstract class FhirRepository {
   abstract patchResource<T extends Resource>(
     resourceType: T['resourceType'],
     id: string,
-    patch: Operation[] | Parameters
+    patch: Operation[] | Parameters,
+    options?: UpdateResourceOptions
   ): Promise<WithId<T>>;
 
   /**
@@ -196,10 +218,12 @@ export abstract class FhirRepository {
    * Runs a callback function within a transaction.
    *
    * @param callback - The callback function to be run within a transaction.
+   * @param options - The transaction options.
+   * @returns The result of the callback function.
    */
   abstract withTransaction<TResult>(
     callback: (txRepo: this) => Promise<TResult>,
-    options?: { serializable?: boolean }
+    options: TransactionOptions
   ): Promise<TResult>;
 
   /**
@@ -281,7 +305,10 @@ export abstract class FhirRepository {
         const createdResource = await txRepo.createResource(resource, options);
         return { resource: createdResource, outcome: created };
       },
-      { serializable: true } // Requires strong transactional guarantees to ensure unique resource creation
+      {
+        resourceTypes: getSearchResourceTypes(search),
+        serializable: true, // serializable to ensure unique resource creation
+      }
     );
   }
 
@@ -341,7 +368,7 @@ export abstract class FhirRepository {
         const updated = await txRepo.updateResource({ ...resource, id: existing.id }, options);
         return { resource: updated, outcome: allOk };
       },
-      { serializable: true }
+      { serializable: true, resourceTypes: getSearchResourceTypes(search) }
     );
   }
 
@@ -375,11 +402,15 @@ export abstract class FhirRepository {
         const resource = matches[0];
         await txRepo.deleteResource(resource.resourceType, resource.id);
       },
-      { serializable: true }
+      { serializable: true, resourceTypes: getSearchResourceTypes(search) }
     );
   }
 
-  async conditionalPatch(search: SearchRequest, patch: Operation[]): Promise<WithId<Resource>> {
+  async conditionalPatch(
+    search: SearchRequest,
+    patch: Operation[],
+    options?: UpdateResourceOptions
+  ): Promise<WithId<Resource>> {
     // Limit search to optimize DB query
     search.count = 2;
     search.sortRules = undefined;
@@ -394,9 +425,9 @@ export abstract class FhirRepository {
         }
 
         const resource = matches[0];
-        return txRepo.patchResource(resource.resourceType, resource.id, patch);
+        return txRepo.patchResource(resource.resourceType, resource.id, patch, options);
       },
-      { serializable: true }
+      { serializable: true, resourceTypes: getSearchResourceTypes(search) }
     );
   }
 }
@@ -438,11 +469,11 @@ export class MemoryRepository extends FhirRepository {
     // MockRepository ignores reader/writer mode
   }
 
-  async createResource<T extends Resource>(
+  private createResourceSync<T extends Resource>(
     resource: T,
     options?: CreateResourceOptions,
     update: boolean = false
-  ): Promise<WithId<T>> {
+  ): WithId<T> {
     //simulate round-tripping through a JSON serialized format
     const parsed = JSON.parse(stringify(resource)) as T;
     const result = {
@@ -492,6 +523,14 @@ export class MemoryRepository extends FhirRepository {
     return deepClone(result);
   }
 
+  async createResource<T extends Resource>(
+    resource: T,
+    options?: CreateResourceOptions,
+    update: boolean = false
+  ): Promise<WithId<T>> {
+    return this.createResourceSync(resource, options, update);
+  }
+
   generateId(): string {
     return generateId();
   }
@@ -519,7 +558,8 @@ export class MemoryRepository extends FhirRepository {
   async patchResource<T extends Resource>(
     resourceType: T['resourceType'],
     id: string,
-    patch: Operation[] | Parameters
+    patch: Operation[] | Parameters,
+    options?: UpdateResourceOptions
   ): Promise<WithId<T>> {
     const resource = await this.readResource<T>(resourceType, id);
 
@@ -529,8 +569,8 @@ export class MemoryRepository extends FhirRepository {
         if (patchResult.length > 0) {
           throw new OperationOutcomeError(badRequest(patchResult.map((e) => (e as Error).message).join('\n')));
         }
-      } else {
-        throw new Error('MemoryRepository does not support FHIRPath Patch');
+      } else if (patch.parameter) {
+        fhirpathPatchTypedValue(toTypedValue(resource), parseFhirPathPatchParameters(patch));
       }
     } catch (err) {
       throw new OperationOutcomeError(normalizeOperationOutcome(err));
@@ -544,7 +584,7 @@ export class MemoryRepository extends FhirRepository {
       delete resource.meta.lastUpdated;
     }
 
-    return this.updateResource(resource);
+    return this.updateResource(resource, options);
   }
 
   async readResource<T extends Resource>(resourceType: string, id: string): Promise<T> {
@@ -566,7 +606,15 @@ export class MemoryRepository extends FhirRepository {
   async readReferences<T extends Resource>(
     references: readonly Reference<T>[]
   ): Promise<(T | OperationOutcomeError)[]> {
-    return Promise.all(references.map((r) => this.readReference<T>(r)));
+    // Unresolvable references are returned as errors rather than rejecting the whole batch,
+    // matching the `(T | Error)[]` contract on FhirRepository.
+    return Promise.all(
+      references.map(async (r) =>
+        this.readReference<T>(r).catch((err) =>
+          err instanceof OperationOutcomeError ? err : new OperationOutcomeError(normalizeOperationOutcome(err))
+        )
+      )
+    );
   }
 
   async readHistory<T extends Resource>(resourceType: string, id: string): Promise<Bundle<T>> {
@@ -593,16 +641,40 @@ export class MemoryRepository extends FhirRepository {
     return deepClone(version);
   }
 
-  async search<T extends Resource>(searchRequest: SearchRequest<T>): Promise<Bundle<WithId<T>>> {
+  private searchSync<T extends Resource>(searchRequest: SearchRequest<T>): Bundle<WithId<T>> {
     const { resourceType } = searchRequest;
     const resources = this.resources.get(resourceType) ?? new Map();
+
+    // Chained filters (e.g. `actor:Practitioner.name`) have no entry in the flat search
+    // parameter table, so `matchesSearchRequest` can't evaluate them directly. Split them
+    // out and resolve each one against the referenced resource instead.
+    const plainFilters: Filter[] = [];
+    const chainedFilters: ChainedFilter[] = [];
+    for (const filter of searchRequest.filters ?? EMPTY) {
+      const chain = parseChainedFilter(resourceType, filter);
+      if (chain) {
+        chainedFilters.push(chain);
+      } else {
+        plainFilters.push(filter);
+      }
+    }
+    const baseRequest: SearchRequest<T> = chainedFilters.length
+      ? { ...searchRequest, filters: plainFilters }
+      : searchRequest;
+
     const result = [];
     for (const resource of resources.values()) {
-      if (matchesSearchRequest(resource, searchRequest)) {
+      if (
+        matchesSearchRequest(resource, baseRequest) &&
+        chainedFilters.every((chain) => matchesChainedFilter(this.resources, resource, chain))
+      ) {
         result.push(resource);
       }
     }
-    let entry = result.map((resource) => ({ resource: deepClone(resource) }));
+    let entry = result.map((resource): BundleEntry<WithId<T>> => ({
+      search: { mode: 'match' },
+      resource: deepClone(resource),
+    }));
     for (const sortRule of searchRequest.sortRules ?? EMPTY) {
       entry = entry.sort((a, b) => sortComparator(a.resource as T, b.resource as T, sortRule));
     }
@@ -618,6 +690,50 @@ export class MemoryRepository extends FhirRepository {
       entry: entry.length ? entry : undefined,
       total: result.length,
     };
+  }
+
+  async search<T extends Resource>(searchRequest: SearchRequest<T>): Promise<Bundle<WithId<T>>> {
+    const bundle = this.searchSync(searchRequest);
+    if ((searchRequest.include || searchRequest.revInclude) && bundle.entry?.length) {
+      // `total` intentionally continues to reflect only the matched resources.
+      const entries = bundle.entry as BundleEntry[];
+      const resources = entries.map((e) => e.resource as WithId<T>);
+      await getExtraEntries(this, searchRequest, resources, entries);
+      bundle.entry = entries as BundleEntry<WithId<T>>[];
+    }
+    return bundle;
+  }
+
+  async conditionalCreate<T extends Resource>(
+    resource: T,
+    search: SearchRequest<T>,
+    options?: CreateResourceOptions
+  ): Promise<{ resource: WithId<T>; outcome: OperationOutcome }> {
+    if (search.resourceType !== resource.resourceType) {
+      throw new OperationOutcomeError(badRequest('Search type must match resource type for conditional update'));
+    }
+
+    search.count = 2;
+    search.sortRules = undefined;
+
+    // Not wrapped in transaction as we can use synchronous access to simulate
+    // transaction-like behavior
+    const bundle = this.searchSync(search);
+    const matches = bundle.entry?.map((e) => e.resource as WithId<T>) ?? [];
+    if (matches.length === 1) {
+      const existing = matches[0];
+      if (!options?.assignedId && resource.id && resource.id !== existing.id) {
+        throw new OperationOutcomeError(
+          badRequest('Resource ID did not match resolved ID', resource.resourceType + '.id')
+        );
+      }
+      return { resource: matches[0], outcome: allOk };
+    } else if (matches.length > 1) {
+      throw new OperationOutcomeError(multipleMatches);
+    }
+
+    const createdResource = this.createResourceSync(resource, options);
+    return { resource: createdResource, outcome: created };
   }
 
   async searchByReference<T extends Resource>(
@@ -648,10 +764,105 @@ export class MemoryRepository extends FhirRepository {
     this.resources.get(resourceType)?.delete(id);
   }
 
+  async expungeResource(resourceType: string, id: string): Promise<void> {
+    await this.expungeResources(resourceType, [id]);
+  }
+
+  async expungeResources(resourceType: string, ids: string[]): Promise<void> {
+    // Intentionally skips the history tombstone the server Repository writes.
+    const resources = this.resources.get(resourceType);
+    const resourceHistory = this.history.get(resourceType);
+    for (const id of ids) {
+      resources?.delete(id);
+      resourceHistory?.delete(id);
+    }
+  }
+
   withTransaction<TResult>(callback: (repo: this) => Promise<TResult>): Promise<TResult> {
     // MockRepository currently does not support transactions
     return callback(this);
   }
+}
+
+interface ChainedFilter {
+  /** The FHIRPath expression that reads the reference field being chained through. */
+  expression: string;
+  /** The resource type the chain resolves to, either given explicitly or the parameter's sole target. */
+  targetType: string;
+  /** The chained parameter, parsed as a search request against `targetType`. */
+  chained: SearchRequest;
+}
+
+/**
+ * Recognizes a forward-chained filter, e.g. `actor:Practitioner.name`, and resolves everything
+ * needed to evaluate it: how to read the reference off the source resource, which resource type
+ * it points to, and the chained parameter parsed as its own search request. Reverse chaining
+ * (`_has`) is not supported.
+ * @param resourceType - The resource type being searched.
+ * @param filter - The filter to inspect.
+ * @returns The resolved chain, or undefined if the filter isn't a supported forward chain.
+ */
+function parseChainedFilter(resourceType: string, filter: Filter): ChainedFilter | undefined {
+  const dotIndex = filter.code.indexOf('.');
+  if (dotIndex < 0 || filter.code.startsWith('_has:')) {
+    return undefined;
+  }
+
+  if (filter.operator !== Operator.EQUALS) {
+    throw new Error('MemoryRepository does not support this chained filter yet.');
+  }
+
+  const left = filter.code.slice(0, dotIndex);
+  const chainedKey = filter.code.slice(dotIndex + 1);
+  const colonIndex = left.indexOf(':');
+  const refCode = colonIndex < 0 ? left : left.slice(0, colonIndex);
+
+  const searchParam = globalSchema.types[resourceType]?.searchParams?.[refCode];
+
+  // With no explicit `:Type`, only an unambiguous (single-target) reference param can chain.
+  if (colonIndex === -1 && searchParam?.target?.length !== 1) {
+    throw new OperationOutcomeError(
+      badRequest(`Unable to identify next resource type for search parameter: ${resourceType}?${refCode}`)
+    );
+  }
+  const targetType = colonIndex < 0 ? searchParam?.target?.[0] : left.slice(colonIndex + 1);
+
+  if (!searchParam?.expression || !targetType) {
+    return undefined;
+  }
+
+  return {
+    expression: searchParam.expression,
+    targetType,
+    chained: parseSearchRequest(targetType, { [chainedKey]: filter.value }),
+  };
+}
+
+/**
+ * Evaluates a resolved chain against one resource: does any reference it holds through
+ * `chain.expression` point to a `chain.targetType` resource satisfying `chain.chained`?
+ * @param resources - All repository resources, keyed by resource type then id.
+ * @param resource - The resource being tested.
+ * @param chain - The resolved chain to evaluate.
+ * @returns Whether the resource satisfies the chained filter.
+ */
+function matchesChainedFilter(
+  resources: Map<string, Map<string, Resource>>,
+  resource: Resource,
+  chain: ChainedFilter
+): boolean {
+  const references = evalFhirPath(chain.expression, resource) as (Reference | undefined)[];
+  for (const reference of references) {
+    const [refType, refId] = reference?.reference?.split('/') ?? [];
+    if (refType !== chain.targetType || !refId) {
+      continue;
+    }
+    const target = resources.get(refType)?.get(refId);
+    if (target && matchesSearchRequest(target, chain.chained)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const sortComparator = <T extends Resource>(a: T, b: T, sortRule: SortRule): number => {

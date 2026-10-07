@@ -1,9 +1,8 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { createReference, generateId } from '@medplum/core';
+import { createReference, generateId, toServiceTypeCodeableConcepts } from '@medplum/core';
 import type { HealthcareService, Practitioner, Project, Schedule } from '@medplum/fhirtypes';
-import { toCodeableReferenceLike } from '../../../util/servicetype';
 import { withPath } from '../../../util/withpath';
 import { getHealthcareServiceSchedulingParameters, getScheduleSchedulingParameters } from './scheduling-parameters';
 
@@ -35,6 +34,7 @@ describe('getHealthcareServiceSchedulingParameters', () => {
       alignmentOffset: 0,
       alignmentTimezone: 'Etc/UTC',
       service: { reference: 'HealthcareService/hs-12345' },
+      slotCapacity: 1,
     });
   });
 
@@ -66,6 +66,7 @@ describe('getHealthcareServiceSchedulingParameters', () => {
       alignmentOffset: 0,
       alignmentTimezone: 'Etc/UTC',
       service: { reference: 'HealthcareService/hs-12345' },
+      slotCapacity: 1,
     });
   });
 
@@ -98,6 +99,7 @@ describe('getHealthcareServiceSchedulingParameters', () => {
       alignmentTimezone: 'Etc/UTC',
       duration: 120,
       service: { reference: 'HealthcareService/hs-12345' },
+      slotCapacity: 1,
     });
   });
 
@@ -127,6 +129,7 @@ describe('getHealthcareServiceSchedulingParameters', () => {
               { url: 'alignmentOffset', valueDuration: { unit: 'min', value: 15 } },
               { url: 'alignmentTimezone', valueCode: 'America/Los_Angeles' },
               { url: 'timezone', valueCode: 'America/Phoenix' },
+              { url: 'slotCapacity', valuePositiveInt: 2 },
             ],
           },
         ],
@@ -155,6 +158,7 @@ describe('getHealthcareServiceSchedulingParameters', () => {
       duration: 120,
       service: { reference: 'HealthcareService/hs-12345' },
       timezone: 'America/Phoenix',
+      slotCapacity: 2,
     });
   });
 
@@ -296,6 +300,22 @@ describe('getHealthcareServiceSchedulingParameters', () => {
       );
     }
   );
+
+  test('rejects a slotCapacity below 1', () => {
+    const service = withPath(
+      {
+        ...baseService,
+        extension: [
+          {
+            url: 'https://medplum.com/fhir/StructureDefinition/SchedulingParameters',
+            extension: [{ url: 'slotCapacity', valuePositiveInt: 0 }],
+          },
+        ],
+      },
+      'Path.HealthcareService'
+    );
+    expect(() => getHealthcareServiceSchedulingParameters(service)).toThrow('valuePositiveInt must be an integer >= 1');
+  });
 });
 
 describe('getScheduleSchedulingParameters', () => {
@@ -319,7 +339,7 @@ describe('getScheduleSchedulingParameters', () => {
   const baseSchedule = {
     resourceType: 'Schedule',
     actor: [createReference(practitioner)],
-    serviceType: toCodeableReferenceLike(baseService),
+    serviceType: toServiceTypeCodeableConcepts(baseService),
   } satisfies Schedule;
 
   test('with no extension', () => {
@@ -358,6 +378,7 @@ describe('getScheduleSchedulingParameters', () => {
       alignmentTimezone: 'Etc/UTC',
       duration: 120,
       service: { reference: 'HealthcareService/hs-12345' },
+      slotCapacity: 1,
     });
   });
 
@@ -384,6 +405,7 @@ describe('getScheduleSchedulingParameters', () => {
               { url: 'alignmentOffset', valueDuration: { unit: 'min', value: 15 } },
               { url: 'alignmentTimezone', valueCode: 'America/Los_Angeles' },
               { url: 'timezone', valueCode: 'America/Phoenix' },
+              { url: 'slotCapacity', valuePositiveInt: 3 },
             ],
           },
         ],
@@ -408,6 +430,7 @@ describe('getScheduleSchedulingParameters', () => {
       duration: 120,
       service: { reference: 'HealthcareService/hs-12345' },
       timezone: 'America/Phoenix',
+      slotCapacity: 3,
     });
   });
 
@@ -433,6 +456,7 @@ describe('getScheduleSchedulingParameters', () => {
               { url: 'alignmentOffset', valueDuration: { unit: 'min', value: 15 } },
               { url: 'alignmentTimezone', valueCode: 'America/Los_Angeles' },
               { url: 'timezone', valueCode: 'America/Phoenix' },
+              { url: 'slotCapacity', valuePositiveInt: 4 },
             ],
           },
         ],
@@ -454,6 +478,7 @@ describe('getScheduleSchedulingParameters', () => {
               { url: 'alignmentOffset', valueDuration: { unit: 'min', value: 5 } },
               { url: 'alignmentTimezone', valueCode: 'America/Chicago' },
               { url: 'timezone', valueCode: 'America/New_York' },
+              { url: 'slotCapacity', valuePositiveInt: 5 },
               {
                 url: 'availability',
                 extension: [
@@ -508,6 +533,7 @@ describe('getScheduleSchedulingParameters', () => {
       duration: 180,
       service: { reference: 'HealthcareService/hs-12345' },
       timezone: 'America/New_York',
+      slotCapacity: 5,
     });
   });
 });

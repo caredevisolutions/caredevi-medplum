@@ -14,7 +14,6 @@ import { getGlobalSystemRepo, getProjectSystemRepo } from '../fhir/repo';
 import { setupPwnedPasswordMock, setupRecaptchaMock, withTestContext } from '../test.setup';
 import { registerNew } from './register';
 
-vi.mock('hibp');
 const fetchMock = vi.spyOn(globalThis, 'fetch');
 const app = express();
 
@@ -29,6 +28,7 @@ describe('New user', () => {
   beforeEach(() => {
     getConfig().registerEnabled = undefined;
     getConfig().requireVerifiedEmailForProjectCreation = undefined;
+    getConfig().blockedEmailDomains = undefined;
   });
 
   afterAll(async () => {
@@ -56,7 +56,7 @@ describe('New user', () => {
         projectId: 'new',
       });
 
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
     expect(res.body.login).toBeDefined();
     expect(res.body.code).toBeUndefined();
     expect(res.body.emailVerificationRequired).toStrictEqual(false);
@@ -75,7 +75,7 @@ describe('New user', () => {
         recaptchaToken: 'xyz',
       });
 
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect(res.body.issue[0].details.text).toBe('Registration is disabled');
   });
 
@@ -90,7 +90,7 @@ describe('New user', () => {
         password: 'password!@#',
       });
 
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect(res.body.issue[0].details.text).toBe('Recaptcha token is required');
   });
 
@@ -108,7 +108,7 @@ describe('New user', () => {
         recaptchaToken: 'wrong',
       });
 
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect(res.body.issue[0].details.text).toBe('Recaptcha failed');
   });
 
@@ -122,8 +122,8 @@ describe('New user', () => {
     };
 
     const res = await request(app).post('/auth/newuser').type('json').send(registerRequest);
-    expect(res.status).toBe(400);
-    expect(res.body.issue[0].details.text).toBe('Password must be between 8 and 72 characters');
+    expect(res).toHaveStatus(400);
+    expect(res.body.issue[0].details.text).toBe('Password must be at least 8 characters');
   });
 
   test('Password too long', async () => {
@@ -136,8 +136,8 @@ describe('New user', () => {
     };
 
     const res = await request(app).post('/auth/newuser').type('json').send(registerRequest);
-    expect(res.status).toBe(400);
-    expect(res.body.issue[0].details.text).toBe('Password must be between 8 and 72 characters');
+    expect(res).toHaveStatus(400);
+    expect(res.body.issue[0].details.text).toBe('Password must be no more than 72 characters');
   });
 
   test('Multibyte password too long', async () => {
@@ -153,8 +153,25 @@ describe('New user', () => {
     };
 
     const res = await request(app).post('/auth/newuser').type('json').send(registerRequest);
-    expect(res.status).toBe(400);
-    expect(res.body.issue[0].details.text).toBe('Password must be between 8 and 72 characters');
+    expect(res).toHaveStatus(400);
+    expect(res.body.issue[0].details.text).toBe('Password must be no more than 72 characters');
+  });
+
+  test('Multibyte password too short', async () => {
+    // Two emoji: 2 characters but 8 bytes. The minimum is measured in
+    // characters, so this is rejected as too short even though it clears the
+    // byte-length check.
+    const registerRequest = {
+      firstName: 'George',
+      lastName: 'Washington',
+      email: `george${randomUUID()}@example.com`,
+      password: '🔑🔓',
+      recaptchaToken: 'xyz',
+    };
+
+    const res = await request(app).post('/auth/newuser').type('json').send(registerRequest);
+    expect(res).toHaveStatus(400);
+    expect(res.body.issue[0].details.text).toBe('Password must be at least 8 characters');
   });
 
   test('Breached password', async () => {
@@ -172,7 +189,7 @@ describe('New user', () => {
         recaptchaToken: 'wrong',
       });
 
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect(res.body).toMatchObject(badRequest('Password found in breach database', 'password'));
   });
 
@@ -186,10 +203,10 @@ describe('New user', () => {
     };
 
     const res = await request(app).post('/auth/newuser').type('json').send(registerRequest);
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
 
     const res2 = await request(app).post('/auth/newuser').type('json').send(registerRequest);
-    expect(res2.status).toBe(400);
+    expect(res2).toHaveStatus(400);
     expect(res2.body.issue[0].details.text).toBe('Email already registered');
   });
 
@@ -241,7 +258,7 @@ describe('New user', () => {
         recaptchaToken: 'xyz',
       });
 
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
     expect(res.body.login).toBeDefined();
     expect(res.body.code).toBeUndefined();
   });
@@ -294,7 +311,7 @@ describe('New user', () => {
         recaptchaToken: 'xyz',
       });
 
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect((res.body as OperationOutcome).issue?.[0]?.details?.text).toBe('Invalid recaptchaSiteKey');
   });
 
@@ -345,7 +362,7 @@ describe('New user', () => {
         recaptchaToken: 'xyz',
       });
 
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect(res.body.issue[0].details.text).toStrictEqual('Project does not allow open registration');
   });
 
@@ -361,7 +378,7 @@ describe('New user', () => {
         recaptchaSiteKey: randomUUID(),
         recaptchaToken: 'xyz',
       });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect((res.body as OperationOutcome).issue?.[0]?.details?.text).toBe('Invalid recaptchaSiteKey');
   });
 
@@ -406,7 +423,7 @@ describe('New user', () => {
         recaptchaSiteKey,
         recaptchaToken: 'xyz',
       });
-    expect(res.status).toBe(400);
+    expect(res).toHaveStatus(400);
     expect((res.body as OperationOutcome).issue?.[0]?.details?.text).toBe('Invalid recaptchaSecretKey');
   });
 
@@ -462,7 +479,7 @@ describe('New user', () => {
         password,
         recaptchaToken: 'xyz',
       });
-    expect(res1.status).toBe(200);
+    expect(res1).toHaveStatus(200);
     expect(res1.body.login).toBeDefined();
     expect(res1.body.code).toBeUndefined();
 
@@ -478,7 +495,7 @@ describe('New user', () => {
         password,
         recaptchaToken: 'xyz',
       });
-    expect(res2.status).toBe(200);
+    expect(res2).toHaveStatus(200);
     expect(res2.body.login).toBeDefined();
     expect(res2.body.code).toBeUndefined();
 
@@ -495,7 +512,7 @@ describe('New user', () => {
         password,
         recaptchaToken: 'xyz',
       });
-    expect(res3.status).toBe(200);
+    expect(res3).toHaveStatus(200);
     expect(res3.body.login).toBeDefined();
     expect(res3.body.code).toBeUndefined();
 
@@ -512,7 +529,7 @@ describe('New user', () => {
         password,
         recaptchaToken: 'xyz',
       });
-    expect(res4.status).toBe(400);
+    expect(res4).toHaveStatus(400);
     expect(res4.body.login).toBeUndefined();
     expect(res4.body.code).toBeUndefined();
     expect(res4.body).toMatchObject({
@@ -540,7 +557,7 @@ describe('New user', () => {
         password,
         recaptchaToken: 'xyz',
       });
-    expect(res5.status).toBe(200);
+    expect(res5).toHaveStatus(200);
     expect(res5.body.login).toBeDefined();
     expect(res5.body.code).toBeUndefined();
 
@@ -556,7 +573,7 @@ describe('New user', () => {
         password,
         recaptchaToken: 'xyz',
       });
-    expect(res6.status).toBe(404);
+    expect(res6).toHaveStatus(404);
     expect(res6.body.login).toBeUndefined();
     expect(res6.body.code).toBeUndefined();
   });
@@ -581,7 +598,7 @@ describe('New user', () => {
       recaptchaToken: 'xyz',
     });
 
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
 
     // Read the User back directly and assert meta.project is set
     const systemRepo = getGlobalSystemRepo();
@@ -603,7 +620,7 @@ describe('New user', () => {
       recaptchaToken: 'xyz',
     });
 
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
 
     const systemRepo = getGlobalSystemRepo();
     const bundle = await systemRepo.search<User>({
@@ -626,7 +643,7 @@ describe('New user', () => {
         password: 'password!@#',
       });
 
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
     expect(res.body.login).toBeDefined();
     expect(res.body.code).toBeUndefined();
   });
@@ -645,7 +662,7 @@ describe('New user', () => {
         projectId: 'new',
       });
 
-    expect(res.status).toBe(200);
+    expect(res).toHaveStatus(200);
     expect(res.body.login).toBeDefined();
     expect(res.body.code).toBeUndefined();
     expect(res.body.emailVerificationRequired).toBe(true);

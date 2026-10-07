@@ -27,7 +27,7 @@ import type { QueryConfigValues, QueryResult, QueryResultRow } from 'pg';
 import { Client as PgClient } from 'pg';
 import request from 'supertest';
 import type { Mock, MockInstance } from 'vitest';
-import { vi } from 'vitest';
+import { inject, vi } from 'vitest';
 import type { ServerInviteResponse } from './admin/invite';
 import type * as App from './app';
 import type { MedplumRedisConfig } from './config/types';
@@ -45,6 +45,8 @@ import type { PgQueryable } from './fhir/sql';
 import { requestContextStore } from './request-context-store';
 // supertest v7 can cause websocket tests to hang without this
 setDefaultResultOrder('ipv4first');
+
+Error.stackTraceLimit = 20;
 
 // Many integration tests call initApp/shutdownApp in quick succession (e.g. resource-cap.test.ts
 // does both in beforeEach/afterEach). Without serialization, shutdown can overlap the next init,
@@ -224,6 +226,57 @@ export async function initTestAuth(options?: TestProjectOptions): Promise<string
   return (await createTestProject({ ...options, withAccessToken: true })).accessToken;
 }
 
+type SuperAdminTestProjectOptions = {
+  superAdmin: true;
+  withClient: true;
+  withAccessToken: true;
+  withRepo: true;
+};
+
+let superAdminTestProjectPromise: Promise<TestProjectResult<SuperAdminTestProjectOptions>> | undefined;
+
+/**
+ * Returns the Super Admin test project shared by every test file in the run.
+ * @returns The shared Super Admin `TestProjectResult`.
+ */
+export function getSuperAdminTestProject(): Promise<TestProjectResult<SuperAdminTestProjectOptions>> {
+  superAdminTestProjectPromise ??= (async () => {
+    const { getRepoForLogin } = await import('./fhir/accesspolicy');
+    const { getShardSystemRepo } = await import('./fhir/repo');
+    const systemRepo = getShardSystemRepo(PLACEHOLDER_SHARD_ID);
+
+    const [project, client, membership, login] = await Promise.all([
+      systemRepo.readResource<Project>('Project', inject('superAdminProjectId')),
+      systemRepo.readResource<ClientApplication>('ClientApplication', inject('superAdminClientId')),
+      systemRepo.readResource<ProjectMembership>('ProjectMembership', inject('superAdminMembershipId')),
+      systemRepo.readResource<Login>('Login', inject('superAdminLoginId')),
+    ]);
+
+    const userConfig = { resourceType: 'UserConfiguration' } as const;
+    const repo = await getRepoForLogin({ login, project, membership, userConfig }, true);
+
+    return {
+      project,
+      accessPolicy: undefined,
+      client,
+      membership,
+      login,
+      accessToken: inject('superAdminAccessToken'),
+      repo,
+    };
+  })();
+  return superAdminTestProjectPromise;
+}
+
+/**
+ * Returns an access token for the shared Super Admin test project. See `getSuperAdminTestProject`.
+ * @returns A Super Admin access token.
+ */
+export async function getSuperAdminAccessToken(): Promise<string> {
+  const { accessToken } = await getSuperAdminTestProject();
+  return accessToken;
+}
+
 export async function addTestUser(
   project: WithId<Project>,
   options?: {
@@ -302,6 +355,31 @@ export {
 } from './test.setup.fetch';
 
 /**
+ * Spies on `process.stdout.write` and swallows everything written to it, keeping
+ * log output (from any `Logger` instance) out of the terminal during a test.
+ *
+ * Because all loggers ultimately write through `process.stdout.write`, this silences
+ * `globalLogger` and any request-context logger alike, without altering logger
+ * behavior or having to mock individual log methods.
+ *
+ * The returned spy must be restored once the test (or suite) finishes, e.g.:
+ *
+ * ```ts
+ * let stdoutSpy: vi.SpyInstance;
+ * beforeEach(() => { stdoutSpy = mockStdoutWrite(); });
+ * afterEach(() => { stdoutSpy.mockRestore(); });
+ * ```
+ *
+ * Note: this suppresses the terminal output only. To assert on what was logged,
+ * spy on the relevant logger method directly (e.g. `vi.spyOn(getLogger(), 'info')`).
+ *
+ * @returns The spy installed on `process.stdout.write`; call `mockRestore()` to undo.
+ */
+export function mockStdoutWrite(): MockInstance<typeof process.stdout.write> {
+  return vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+}
+
+/**
  * Returns true if the resource is in an entry in the bundle.
  * @param bundle - A bundle of resources.
  * @param resource - The resource to search for.
@@ -315,13 +393,20 @@ export function bundleContains(bundle: Bundle, resource: Resource): BundleEntry 
  * Waits for a function to evaluate successfully.
  * Use this to wait for async behaviors without a handle.
  * @param fn - Function to call.
+ * @param timeoutMs - Maximum time to wait before rejecting (default 10s).
  */
-export function waitFor(fn: () => Promise<void>): Promise<void> {
-  return new Promise((resolve) => {
+export function waitFor(fn: () => Promise<void>, timeoutMs = 10_000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
     const timer = setInterval(() => {
+      if (Date.now() > deadline) {
+        clearInterval(timer);
+        reject(new Error(`waitFor timed out after ${timeoutMs}ms`));
+        return;
+      }
       fn()
         .then(() => {
-          clearTimeout(timer);
+          clearInterval(timer);
           resolve();
         })
         .catch(() => {

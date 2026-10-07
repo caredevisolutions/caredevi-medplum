@@ -12,6 +12,16 @@ export const TestOrganization: WithId<Organization> = {
     versionId: '1',
   },
   name: 'Test Organization',
+  address: [
+    {
+      use: 'work',
+      line: ['123 Test Street'],
+      city: 'Springfield',
+      state: 'CA',
+      postalCode: '90210',
+      country: 'US',
+    },
+  ],
 };
 
 export const DifferentOrganization: WithId<Organization> = {
@@ -63,12 +73,7 @@ export const DrAliceSmithPreviousVersion: WithId<Practitioner> = {
 export const DrAliceSmithSchedule: WithId<Schedule> = {
   resourceType: 'Schedule',
   id: 'alice-smith-schedule',
-  actor: [
-    {
-      reference: `Practitioner/${MOCK_ALICE_PRACTITIONER_ID}`,
-      display: 'Dr. Alice Smith',
-    },
-  ],
+  actor: [createReference(DrAliceSmith)],
 };
 
 export const makeDrAliceSmithSlots = lazy((): WithId<Slot>[] => {
